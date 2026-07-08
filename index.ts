@@ -27,8 +27,10 @@ import { StringEnum } from "@earendil-works/pi-ai";
 const MEMORY_DIR = path.join(homedir(), ".pi", "agent", "memory");
 const MOC_PATH = path.join(MEMORY_DIR, "MOC.md");
 const CHECKPOINT_PATH = path.join(MEMORY_DIR, ".checkpoint.json");
+const SESSIONS_DIR = path.join(MEMORY_DIR, "Sessions");
 
 const DEFAULT_SECTIONS = ["Conventions", "User", "Skills"];
+const SESSION_MAX_AGE_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -294,6 +296,79 @@ function readCheckpoint(): Checkpoint {
 function writeCheckpoint(checkpoint: Checkpoint): void {
   ensureDir(MEMORY_DIR);
   fs.writeFileSync(CHECKPOINT_PATH, JSON.stringify(checkpoint, null, 2) + "\n", "utf8");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Session archive helpers                                            */
+/* ------------------------------------------------------------------ */
+
+function getSessionsDir(): string {
+  ensureDir(SESSIONS_DIR);
+  return SESSIONS_DIR;
+}
+
+function formatAge(date: Date): string {
+  const diffMs = Date.now() - date.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function archiveSession(ctx: ExtensionContext): void {
+  const sessionFile = ctx.sessionManager.getSessionFile();
+  if (!sessionFile || !fs.existsSync(sessionFile)) return;
+  const sessionId = ctx.sessionManager.getSessionId();
+  const sessionName = ctx.sessionManager.getSessionName() || "unnamed";
+  const safeName = sessionName.replace(/[^a-z0-9_\-\s]/gi, "").replace(/\s+/g, "_").slice(0, 40);
+  const fileName = `${safeName}_${sessionId.slice(0, 8)}.jsonl`;
+  const destPath = path.join(getSessionsDir(), fileName);
+  try {
+    fs.copyFileSync(sessionFile, destPath);
+    const now = new Date();
+    fs.utimesSync(destPath, now, now);
+  } catch {
+    // ignore archive errors
+  }
+}
+
+function cleanupOldSessions(): { deleted: number; names: string[] } {
+  const dir = getSessionsDir();
+  const now = Date.now();
+  const deleted: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const filePath = path.join(dir, entry.name);
+    try {
+      const stat = fs.statSync(filePath);
+      if (now - stat.mtime.getTime() > SESSION_MAX_AGE_MS) {
+        fs.unlinkSync(filePath);
+        deleted.push(entry.name);
+      }
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+  return { deleted: deleted.length, names: deleted };
+}
+
+function listArchivedSessions(): Array<{ name: string; filePath: string; mtime: Date; size: number }> {
+  const dir = getSessionsDir();
+  const sessions: Array<{ name: string; filePath: string; mtime: Date; size: number }> = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const filePath = path.join(dir, entry.name);
+    try {
+      const stat = fs.statSync(filePath);
+      sessions.push({ name: entry.name, filePath, mtime: stat.mtime, size: stat.size });
+    } catch {
+      // ignore
+    }
+  }
+  return sessions.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 }
 
 /* ------------------------------------------------------------------ */
@@ -884,6 +959,23 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     return skillPaths.length ? { skillPaths } : undefined;
   });
 
+  // Auto-archive session on every turn and on shutdown
+  pi.on("turn_end", async (_event, ctx) => {
+    archiveSession(ctx);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    archiveSession(ctx);
+  });
+
+  // Auto-cleanup old sessions on startup
+  pi.on("session_start", async (_event, ctx) => {
+    const { deleted } = cleanupOldSessions();
+    if (deleted > 0 && ctx.hasUI) {
+      ctx.ui.notify(`Auto-cleaned ${deleted} archived session(s) older than 48h`, "info");
+    }
+  });
+
   // /learn command
   pi.registerCommand("learn", {
     description: "Extract and save learning candidates from the session (wizard)",
@@ -907,6 +999,41 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
           "info"
         );
       }
+    },
+  });
+
+  // /session-history command
+  pi.registerCommand("session-history", {
+    description: "List archived sessions and restore a previous one",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/session-history requires an interactive or RPC session.", "error");
+        return;
+      }
+
+      const sessions = listArchivedSessions();
+      if (sessions.length === 0) {
+        ctx.ui.notify("No archived sessions found.", "info");
+        return;
+      }
+
+      const choices = sessions.map(
+        (s) => `${s.name}  —  ${formatAge(s.mtime)}, ${(s.size / 1024).toFixed(1)} KB`
+      );
+
+      const choice = await ctx.ui.select("Select a session to restore:", choices);
+      if (!choice) return;
+
+      const index = choices.indexOf(choice);
+      if (index === -1 || index >= sessions.length) return;
+
+      const target = sessions[index];
+
+      await ctx.switchSession(target.filePath, {
+        withSession: async (newCtx) => {
+          newCtx.ui.notify(`Restored session: ${target.name}`, "success");
+        },
+      });
     },
   });
 }

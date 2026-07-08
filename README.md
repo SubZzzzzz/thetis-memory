@@ -8,6 +8,10 @@ Extension globale de mémoire pour Pi (Thetis). Fournit un vault Markdown (compa
 - **Outil `memory`** : actions `read`, `list`, `search`
 - **Contexte automatique** : le MOC (`MOC.md`) est injecté dans le system prompt à chaque tour
 - **Skills intégrés** : les dossiers `~/.pi/agent/memory/skills/*/SKILL.md` sont découverts comme skills Pi natifs
+- **Auto-save des sessions** : chaque session est archivée automatiquement à chaque tour et à la fermeture
+- **Historique des sessions** : commande `/session-history` pour lister et restaurer une session précédente
+- **Auto-cleanup** : suppression automatique des archives de session inactives depuis plus de 48h
+- **Apprentissage** : commande `/learn` et tool `learn_wizard` pour extraire et sauvegarder des connaissances
 
 ## Installation manuelle
 
@@ -127,6 +131,17 @@ Les skills du vault sont accessibles comme des skills natifs :
 /skill:deploy-api
 ```
 
-## Phase 2
+## Gestion des sessions
 
-Dans une prochaine phase, la commande `/learn` et l'extraction automatique de candidats mémoire seront ajoutées.
+Les sessions sont automatiquement archivées dans `~/.pi/agent/memory/Sessions/` :
+
+- Un snapshot est créé à **chaque tour** (`turn_end`) et à la **fermeture** (`session_shutdown`)
+- Les snapshots portent le nom de la session et sont triés par date
+- Les archives non utilisées depuis **48h** sont automatiquement supprimées au démarrage d'une nouvelle session
+
+### Commandes de session
+
+| Commande | Description |
+|----------|-------------|
+| `/session-history` | Lister les sessions archivées et en restaurer une |
+| `/learn` | Lancer l'extraction interactive de mémoires/skills |
