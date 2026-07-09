@@ -1246,6 +1246,17 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     parameters: MemoryParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      async function confirmAction(question: string): Promise<boolean> {
+        const gatewayConfirm = (globalThis as any).__gatewayConfirm;
+        if (typeof gatewayConfirm === "function") {
+          return await gatewayConfirm(question);
+        }
+        if (ctx.hasUI) {
+          return await ctx.ui.confirm("Memory vault — Confirm action", question);
+        }
+        return false;
+      }
+
       switch (params.action) {
         case "read": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/read");
@@ -1261,29 +1272,20 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         case "move": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/move");
           if (!params.newSection && !params.section) throw new Error("Missing 'newSection' or 'section' parameter for memory/move");
-          if (!ctx.hasUI) {
-            return { content: [{ type: "text", text: "Move cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
-          }
           const targetSection = params.newSection ?? params.section ?? "User";
-          const ok = await ctx.ui.confirm("Memory vault — Confirm move", `Move "${params.id}" to section "${targetSection}"${params.newTitle ? ` and rename to "${params.newTitle}"` : ""}?`);
+          const ok = await confirmAction(`Move "${params.id}" to section "${targetSection}"${params.newTitle ? ` and rename to "${params.newTitle}"` : ""}?`);
           if (!ok) return { content: [{ type: "text", text: "Move cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleMove(params.id, targetSection, params.newTitle) }], details: {} };
         }
         case "delete": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/delete");
-          if (!ctx.hasUI) {
-            return { content: [{ type: "text", text: "Delete cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
-          }
-          const ok = await ctx.ui.confirm("Memory vault — Confirm delete", `Permanently delete "${params.id}" from the vault?`);
+          const ok = await confirmAction(`Permanently delete "${params.id}" from the vault?`);
           if (!ok) return { content: [{ type: "text", text: "Delete cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleDelete(params.id) }], details: {} };
         }
         case "reorganize": {
           if (!params.operation) throw new Error("Missing 'operation' parameter for memory/reorganize");
-          if (!ctx.hasUI) {
-            return { content: [{ type: "text", text: "Reorganize cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
-          }
-          const ok = await ctx.ui.confirm("Memory vault — Confirm reorganize", `Reorganize: ${params.operation}${params.target ? ` on "${params.target}"` : ""}${params.value ? ` with value "${params.value}"` : ""}?`);
+          const ok = await confirmAction(`Reorganize: ${params.operation}${params.target ? ` on "${params.target}"` : ""}${params.value ? ` with value "${params.value}"` : ""}?`);
           if (!ok) return { content: [{ type: "text", text: "Reorganize cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleReorganize(params.operation, params.target, params.value) }], details: {} };
         }
