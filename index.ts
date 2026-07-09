@@ -276,6 +276,93 @@ function addToMoc(title: string, section: string): void {
   fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
 }
 
+function removeFromMoc(title: string, section?: string): void {
+  ensureMoc();
+  const content = fs.readFileSync(MOC_PATH, "utf8");
+  const { frontmatter, sections } = parseMoc(content);
+  for (const sec of sections) {
+    if (section && sec.name.toLowerCase() !== section.toLowerCase()) continue;
+    sec.items = sec.items.filter((i) => i.title.toLowerCase() !== title.toLowerCase());
+  }
+  const nonEmpty = sections.filter((s) => s.items.length > 0);
+  const lines = [stringifyFrontmatter(frontmatter), "", "# Memory", ""];
+  for (const sec of nonEmpty) {
+    lines.push(`## ${sec.name}`, "");
+    for (const item of sec.items) lines.push(`- [[${item.link}]]`);
+    lines.push("");
+  }
+  fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
+}
+
+function renameInMoc(oldTitle: string, newTitle: string, newSection?: string): void {
+  ensureMoc();
+  const content = fs.readFileSync(MOC_PATH, "utf8");
+  const { frontmatter, sections } = parseMoc(content);
+  for (const sec of sections) {
+    const idx = sec.items.findIndex((i) => i.title.toLowerCase() === oldTitle.toLowerCase());
+    if (idx !== -1) {
+      sec.items.splice(idx, 1);
+      break;
+    }
+  }
+  const targetSection = newSection ?? sections.find((s) => s.items.some((i) => i.title.toLowerCase() === oldTitle.toLowerCase()))?.name ?? "User";
+  let target = sections.find((s) => s.name.toLowerCase() === targetSection.toLowerCase());
+  if (!target) {
+    target = { name: targetSection, items: [] };
+    sections.push(target);
+  }
+  if (!target.items.some((i) => i.title.toLowerCase() === newTitle.toLowerCase())) {
+    target.items.push({ title: newTitle, link: newTitle });
+  }
+  const nonEmpty = sections.filter((s) => s.items.length > 0);
+  const lines = [stringifyFrontmatter(frontmatter), "", "# Memory", ""];
+  for (const sec of nonEmpty) {
+    lines.push(`## ${sec.name}`, "");
+    for (const item of sec.items) lines.push(`- [[${item.link}]]`);
+    lines.push("");
+  }
+  fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
+}
+
+function renameSectionInMoc(oldName: string, newName: string): void {
+  ensureMoc();
+  const content = fs.readFileSync(MOC_PATH, "utf8");
+  const { frontmatter, sections } = parseMoc(content);
+  for (const sec of sections) {
+    if (sec.name.toLowerCase() === oldName.toLowerCase()) sec.name = newName;
+  }
+  const lines = [stringifyFrontmatter(frontmatter), "", "# Memory", ""];
+  for (const sec of sections) {
+    lines.push(`## ${sec.name}`, "");
+    for (const item of sec.items) lines.push(`- [[${item.link}]]`);
+    lines.push("");
+  }
+  fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
+}
+
+function mergeSectionsInMoc(source: string, target: string): void {
+  ensureMoc();
+  const content = fs.readFileSync(MOC_PATH, "utf8");
+  const { frontmatter, sections } = parseMoc(content);
+  const src = sections.find((s) => s.name.toLowerCase() === source.toLowerCase());
+  const tgt = sections.find((s) => s.name.toLowerCase() === target.toLowerCase());
+  if (src && tgt) {
+    for (const item of src.items) {
+      if (!tgt.items.some((i) => i.title.toLowerCase() === item.title.toLowerCase())) {
+        tgt.items.push(item);
+      }
+    }
+  }
+  const nonEmpty = sections.filter((s) => s.items.length > 0 && s.name.toLowerCase() !== source.toLowerCase());
+  const lines = [stringifyFrontmatter(frontmatter), "", "# Memory", ""];
+  for (const sec of nonEmpty) {
+    lines.push(`## ${sec.name}`, "");
+    for (const item of sec.items) lines.push(`- [[${item.link}]]`);
+    lines.push("");
+  }
+  fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Checkpoint                                                         */
 /* ------------------------------------------------------------------ */
@@ -296,6 +383,63 @@ function readCheckpoint(): Checkpoint {
 function writeCheckpoint(checkpoint: Checkpoint): void {
   ensureDir(MEMORY_DIR);
   fs.writeFileSync(CHECKPOINT_PATH, JSON.stringify(checkpoint, null, 2) + "\n", "utf8");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Session topic extraction                                           */
+/* ------------------------------------------------------------------ */
+
+const STOP_WORDS = new Set([
+  // français
+  "avec","ce","ces","cette","dans","de","des","du","en","et","je","la","le","les","mais","ne","ou","par","pas","pour","que","qui","se","sur","tu","un","une","est","sont","être","avoir","faire","plus","très","tout","tous","toute","toutes","alors","aussi","autre","autres","aux","avant","car","chez","comme","comment","depuis","donc","encore","entre","ici","ils","juste","leur","leurs","lui","même","mes","mien","mon","nos","notre","nous","on","ont","peu","peut","plupart","quand","quel","quelle","quelles","quels","sa","ses","si","son","ta","te","tes","ton","tous","tout","trop","vos","votre","vous","y",
+  // anglais
+  "the","and","for","are","but","not","you","all","any","can","had","her","was","one","our","out","day","get","has","him","his","how","its","may","new","now","old","see","two","way","who","boy","did","she","use","her","now","him","than","them","well","were","what","with","have","from","they","know","want","been","good","much","some","time","very","when","come","here","just","like","long","make","many","over","such","take","than","them","well","were","will","your","this","that","would","there","could","other","after","first","never","these","think","where","being","every","great","might","shall","still","those","under","while","about","should","really","something","going","want","need","please","ok","okay","yes","no","hi","hello","hey","thanks","thank","merci","salut","bonjour","ca","voila","donc","alors",
+]);
+
+function generateTopicName(ctx: ExtensionContext): string {
+  const entries = ctx.sessionManager.getEntries();
+  const userTexts: string[] = [];
+
+  // Collecte les 3 derniers messages utilisateur (du plus récent au plus ancien)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const msg = entry.message;
+    if (msg.role === "user") {
+      const text = msg.content
+        .filter((c): c is { type: "text"; text: string } => c.type === "text")
+        .map((c) => c.text)
+        .join(" ");
+      if (text.trim()) userTexts.unshift(text.trim());
+      if (userTexts.length >= 3) break;
+    }
+  }
+
+  if (userTexts.length === 0) return "";
+
+  const combined = userTexts.join(" ");
+  const words = combined
+    .toLowerCase()
+    .replace(/[^a-z0-9àâäéèêëïîôöùûüçœ\s]/gi, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !STOP_WORDS.has(w));
+
+  if (words.length === 0) return "";
+
+  // Compte la fréquence pour privilégier les mots répétés (sujet fort)
+  const freq = new Map<string, number>();
+  for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
+  const sorted = Array.from(freq.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  // Prend jusqu'à 4 mots, ou moins si le 1er est déjà très représentatif
+  const selected: string[] = [];
+  for (const [word, count] of sorted) {
+    if (selected.length >= 4) break;
+    // Évite les répétitions exactes (même racine gardée car c'est un slug simple)
+    selected.push(word);
+  }
+
+  return selected.join("_");
 }
 
 /* ------------------------------------------------------------------ */
@@ -323,15 +467,42 @@ function archiveSession(ctx: ExtensionContext): void {
   if (!sessionFile || !fs.existsSync(sessionFile)) return;
   const sessionId = ctx.sessionManager.getSessionId();
   const sessionName = ctx.sessionManager.getSessionName() || "unnamed";
-  const safeName = sessionName.replace(/[^a-z0-9_\-\s]/gi, "").replace(/\s+/g, "_").slice(0, 40);
+  const topicName = generateTopicName(ctx);
+  const baseName = topicName || sessionName.replace(/[^a-z0-9_\-\s]/gi, "").replace(/\s+/g, "_").slice(0, 40);
+  const safeName = baseName.slice(0, 40);
   const fileName = `${safeName}_${sessionId.slice(0, 8)}.jsonl`;
   const destPath = path.join(getSessionsDir(), fileName);
+
   try {
-    fs.copyFileSync(sessionFile, destPath);
+    const raw = fs.readFileSync(sessionFile, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim() !== "");
+    const filtered = lines.map((line) => {
+      try {
+        const entry = JSON.parse(line);
+        if (
+          entry.type === "message" &&
+          entry.message?.role === "assistant" &&
+          Array.isArray(entry.message.content)
+        ) {
+          entry.message.content = entry.message.content.filter(
+            (c: any) => c.type !== "thinking"
+          );
+        }
+        return JSON.stringify(entry);
+      } catch {
+        return line;
+      }
+    });
+    fs.writeFileSync(destPath, filtered.join("\n") + "\n", "utf8");
     const now = new Date();
     fs.utimesSync(destPath, now, now);
   } catch {
-    // ignore archive errors
+    // fallback: raw copy if filtering fails
+    try {
+      fs.copyFileSync(sessionFile, destPath);
+      const now = new Date();
+      fs.utimesSync(destPath, now, now);
+    } catch {}
   }
 }
 
@@ -743,10 +914,15 @@ async function runWizard(
 /* ------------------------------------------------------------------ */
 
 const MemoryParams = Type.Object({
-  action: StringEnum(["read", "list", "search"] as const),
-  id: Type.Optional(Type.String({ description: "Memory id or title (for read)" })),
-  section: Type.Optional(Type.String({ description: "Filter by section (for list)" })),
+  action: StringEnum(["read", "list", "search", "move", "delete", "reorganize"] as const),
+  id: Type.Optional(Type.String({ description: "Memory id or title (for read, move, delete)" })),
+  section: Type.Optional(Type.String({ description: "Filter by section (for list) or destination section (for move)" })),
   query: Type.Optional(Type.String({ description: "Search query (for search)" })),
+  newSection: Type.Optional(Type.String({ description: "Destination section (for move)" })),
+  newTitle: Type.Optional(Type.String({ description: "New title when moving (optional)" })),
+  operation: Type.Optional(StringEnum(["rename_section", "merge_sections", "reorder_items"] as const, { description: "Reorganization type (for reorganize)" })),
+  target: Type.Optional(Type.String({ description: "Target section name (for reorganize)" })),
+  value: Type.Optional(Type.String({ description: "New name, source section, or comma-separated order (for reorganize)" })),
 });
 
 async function handleRead(id: string): Promise<string> {
@@ -812,6 +988,138 @@ async function handleSearch(query: string): Promise<string> {
     .join("\n");
 }
 
+async function handleMove(id: string, newSection: string, newTitle?: string): Promise<string> {
+  const entries = scanVault();
+  const normalizedId = id.toLowerCase().trim();
+  let entry = entries.find((e) => e.id.toLowerCase() === normalizedId || e.title.toLowerCase() === normalizedId);
+  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalizedId));
+  if (!entry) return `Memory not found: "${id}".`;
+
+  const finalTitle = newTitle ? newTitle.trim() : entry.title;
+  const slug = toSlug(finalTitle);
+
+  let newAbsPath: string;
+  let newRelPath: string;
+  if (entry.relPath.startsWith("skills/")) {
+    const oldSkillDir = path.dirname(entry.absPath);
+    const newSkillDir = path.join(MEMORY_DIR, "skills", slug);
+    ensureDir(path.dirname(newSkillDir));
+    fs.renameSync(oldSkillDir, newSkillDir);
+    newAbsPath = path.join(newSkillDir, "SKILL.md");
+    newRelPath = `skills/${slug}/SKILL.md`;
+  } else {
+    const destDir = path.join(MEMORY_DIR, newSection || entry.section || "User");
+    ensureDir(destDir);
+    newAbsPath = path.join(destDir, `${slug}.md`);
+    newRelPath = path.relative(MEMORY_DIR, newAbsPath);
+    fs.renameSync(entry.absPath, newAbsPath);
+  }
+
+  const content = fs.readFileSync(newAbsPath, "utf8");
+  const { frontmatter, body } = parseFrontmatter(content);
+  if (newTitle) frontmatter.title = finalTitle;
+  if (entry.relPath.startsWith("skills/")) {
+    frontmatter.name = slug;
+  } else {
+    frontmatter.id = slug;
+  }
+  fs.writeFileSync(newAbsPath, stringifyFrontmatter(frontmatter) + "\n\n" + body, "utf8");
+
+  renameInMoc(entry.title, finalTitle, newSection || entry.section);
+  return `Moved "${entry.title}" → ${newRelPath}`;
+}
+
+async function handleDelete(id: string): Promise<string> {
+  const entries = scanVault();
+  const normalizedId = id.toLowerCase().trim();
+  let entry = entries.find((e) => e.id.toLowerCase() === normalizedId || e.title.toLowerCase() === normalizedId);
+  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalizedId));
+  if (!entry) return `Memory not found: "${id}".`;
+
+  if (entry.relPath.startsWith("skills/")) {
+    const skillDir = path.dirname(entry.absPath);
+    fs.rmSync(skillDir, { recursive: true, force: true });
+  } else {
+    fs.unlinkSync(entry.absPath);
+  }
+
+  removeFromMoc(entry.title, entry.section);
+  return `Deleted "${entry.title}".`;
+}
+
+async function handleReorganize(operation: string, target?: string, value?: string): Promise<string> {
+  if (operation === "rename_section") {
+    if (!target || !value) return "Missing target (old section) or value (new section) for rename_section.";
+    const entries = scanVault();
+    const toRename = entries.filter((e) => e.section.toLowerCase() === target.toLowerCase() && !e.relPath.startsWith("skills/"));
+    for (const e of toRename) {
+      const newPath = path.join(MEMORY_DIR, value, path.basename(e.relPath));
+      ensureDir(path.dirname(newPath));
+      if (fs.existsSync(e.absPath)) fs.renameSync(e.absPath, newPath);
+      const content = fs.readFileSync(newPath, "utf8");
+      const { frontmatter, body } = parseFrontmatter(content);
+      frontmatter.section = value;
+      fs.writeFileSync(newPath, stringifyFrontmatter(frontmatter) + "\n\n" + body, "utf8");
+    }
+    const oldDir = path.join(MEMORY_DIR, target);
+    if (fs.existsSync(oldDir)) {
+      try { fs.rmdirSync(oldDir); } catch {}
+    }
+    renameSectionInMoc(target, value);
+    return `Renamed section "${target}" → "${value}".`;
+  }
+
+  if (operation === "merge_sections") {
+    if (!target || !value) return "Missing target (destination section) or value (source section) for merge_sections.";
+    const srcDir = path.join(MEMORY_DIR, value);
+    const tgtDir = path.join(MEMORY_DIR, target);
+    if (fs.existsSync(srcDir)) {
+      ensureDir(tgtDir);
+      for (const file of fs.readdirSync(srcDir)) {
+        const srcPath = path.join(srcDir, file);
+        const tgtPath = path.join(tgtDir, file);
+        if (fs.existsSync(srcPath) && fs.statSync(srcPath).isFile()) {
+          fs.renameSync(srcPath, tgtPath);
+        }
+      }
+      fs.rmSync(srcDir, { recursive: true, force: true });
+    }
+    mergeSectionsInMoc(value, target);
+    return `Merged section "${value}" into "${target}".`;
+  }
+
+  if (operation === "reorder_items") {
+    if (!target || !value) return "Missing target (section) or value (comma-separated item titles) for reorder_items.";
+    ensureMoc();
+    const content = fs.readFileSync(MOC_PATH, "utf8");
+    const { frontmatter, sections } = parseMoc(content);
+    const sec = sections.find((s) => s.name.toLowerCase() === target.toLowerCase());
+    if (!sec) return `Section "${target}" not found.`;
+    const order = value.split(",").map((s) => s.trim()).filter(Boolean);
+    const orderedItems: { title: string; link: string }[] = [];
+    for (const t of order) {
+      const found = sec.items.find((i) => i.title.toLowerCase() === t.toLowerCase());
+      if (found) orderedItems.push(found);
+    }
+    for (const item of sec.items) {
+      if (!orderedItems.some((i) => i.title.toLowerCase() === item.title.toLowerCase())) {
+        orderedItems.push(item);
+      }
+    }
+    sec.items = orderedItems;
+    const lines = [stringifyFrontmatter(frontmatter), "", "# Memory", ""];
+    for (const s of sections) {
+      lines.push(`## ${s.name}`, "");
+      for (const item of s.items) lines.push(`- [[${item.link}]]`);
+      lines.push("");
+    }
+    fs.writeFileSync(MOC_PATH, lines.join("\n"), "utf8");
+    return `Reordered items in section "${target}".`;
+  }
+
+  return `Unknown reorganize operation: ${operation}. Supported: rename_section, merge_sections, reorder_items.`;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tool: learn_wizard                                                 */
 /* ------------------------------------------------------------------ */
@@ -861,6 +1169,59 @@ function discoverMemorySkillPaths(): string[] {
 }
 
 /* ------------------------------------------------------------------ */
+/*  TUI notification queue (widget above editor)                     */
+/* ------------------------------------------------------------------ */
+
+interface MemoryNotif {
+  id: number;
+  text: string;
+  expiresAt: number;
+}
+
+let notifId = 0;
+let activeNotifs: MemoryNotif[] = [];
+let widgetTimer: NodeJS.Timeout | null = null;
+let latestCtx: ExtensionContext | null = null;
+
+function refreshWidget() {
+  if (!latestCtx) return;
+  if (activeNotifs.length === 0) {
+    latestCtx.ui.setWidget("thetis-memory", undefined);
+    return;
+  }
+  const lines = activeNotifs.map((n) => `🔧 ${n.text}`);
+  latestCtx.ui.setWidget("thetis-memory", lines, { placement: "aboveEditor" });
+}
+
+function scheduleRefresh() {
+  if (widgetTimer) clearTimeout(widgetTimer);
+  if (activeNotifs.length === 0) {
+    refreshWidget();
+    return;
+  }
+  const now = Date.now();
+  const nextExpire = Math.min(...activeNotifs.map((n) => n.expiresAt));
+  const delay = Math.max(100, nextExpire - now);
+  widgetTimer = setTimeout(() => {
+    activeNotifs = activeNotifs.filter((n) => n.expiresAt > Date.now());
+    refreshWidget();
+    scheduleRefresh();
+  }, delay);
+}
+
+function pushNotification(text: string, ctx: ExtensionContext) {
+  latestCtx = ctx;
+  const now = Date.now();
+  // Reduce previous notifications' remaining time by 1 second (min 500ms)
+  for (const n of activeNotifs) {
+    n.expiresAt = Math.max(now + 500, n.expiresAt - 1000);
+  }
+  activeNotifs.push({ id: ++notifId, text, expiresAt: now + 5000 });
+  refreshWidget();
+  scheduleRefresh();
+}
+
+/* ------------------------------------------------------------------ */
 /*  Extension factory                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -872,12 +1233,15 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     name: "memory",
     label: "Memory",
     description:
-      "Access the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content",
-    promptSnippet: "Read, list, or search the global knowledge vault",
+      "Access and manage the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content\n- move: move a memory to a different section (optionally rename)\n- delete: remove a memory from the vault\n- reorganize: rename sections, merge sections, or reorder items within a section",
+    promptSnippet: "Read, list, search, move, delete, or reorganize the global knowledge vault",
     promptGuidelines: [
       "Use memory/read to load the full content of a known memory when its details are needed for the current task.",
       "Use memory/search to find relevant memories when you are unsure which one applies.",
       "Use memory/list to explore available memories by section.",
+      "Use memory/move to relocate or rename a memory.",
+      "Use memory/delete to permanently remove a memory.",
+      "Use memory/reorganize to restructure sections or reorder the vault layout.",
     ],
     parameters: MemoryParams,
 
@@ -893,6 +1257,19 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         case "search": {
           if (!params.query) throw new Error("Missing 'query' parameter for memory/search");
           return { content: [{ type: "text", text: await handleSearch(params.query) }], details: {} };
+        }
+        case "move": {
+          if (!params.id) throw new Error("Missing 'id' parameter for memory/move");
+          if (!params.newSection && !params.section) throw new Error("Missing 'newSection' or 'section' parameter for memory/move");
+          return { content: [{ type: "text", text: await handleMove(params.id, params.newSection ?? params.section ?? "User", params.newTitle) }], details: {} };
+        }
+        case "delete": {
+          if (!params.id) throw new Error("Missing 'id' parameter for memory/delete");
+          return { content: [{ type: "text", text: await handleDelete(params.id) }], details: {} };
+        }
+        case "reorganize": {
+          if (!params.operation) throw new Error("Missing 'operation' parameter for memory/reorganize");
+          return { content: [{ type: "text", text: await handleReorganize(params.operation, params.target, params.value) }], details: {} };
         }
         default:
           throw new Error(`Unknown memory action: ${params.action}`);
@@ -1000,6 +1377,29 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         );
       }
     },
+  });
+
+  // Notify TUI widget when memory tools are executed
+  pi.on("tool_execution_start", async (event, ctx) => {
+    if (event.toolName === "memory" || event.toolName === "learn_wizard") {
+      const action = (event.args as any)?.action ?? "";
+      pushNotification(`${event.toolName}${action ? "/" + action : ""}`, ctx);
+    }
+  });
+
+  // Clear notifications on session events
+  pi.on("session_start", async () => {
+    activeNotifs = [];
+    if (widgetTimer) { clearTimeout(widgetTimer); widgetTimer = null; }
+    notifId = 0;
+    latestCtx = null;
+  });
+
+  pi.on("session_shutdown", async () => {
+    activeNotifs = [];
+    if (widgetTimer) { clearTimeout(widgetTimer); widgetTimer = null; }
+    notifId = 0;
+    latestCtx = null;
   });
 
   // /session-history command
