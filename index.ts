@@ -1233,19 +1233,19 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     name: "memory",
     label: "Memory",
     description:
-      "Access and manage the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content\n- move: move a memory to a different section (optionally rename)\n- delete: remove a memory from the vault\n- reorganize: rename sections, merge sections, or reorder items within a section",
+      "Access and manage the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content\n- move: move a memory to a different section (optionally rename) — requires interactive user confirmation\n- delete: permanently remove a memory from the vault — requires interactive user confirmation\n- reorganize: rename sections, merge sections, or reorder items within a section — requires interactive user confirmation",},{
     promptSnippet: "Read, list, search, move, delete, or reorganize the global knowledge vault",
     promptGuidelines: [
       "Use memory/read to load the full content of a known memory when its details are needed for the current task.",
       "Use memory/search to find relevant memories when you are unsure which one applies.",
       "Use memory/list to explore available memories by section.",
-      "Use memory/move to relocate or rename a memory.",
-      "Use memory/delete to permanently remove a memory.",
-      "Use memory/reorganize to restructure sections or reorder the vault layout.",
+      "Use memory/move to relocate or rename a memory. The user will be asked to confirm before the change is applied.",
+      "Use memory/delete to permanently remove a memory. The user will be asked to confirm before the deletion is applied.",
+      "Use memory/reorganize to restructure sections or reorder the vault layout. The user will be asked to confirm before the change is applied.",
     ],
     parameters: MemoryParams,
 
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       switch (params.action) {
         case "read": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/read");
@@ -1261,14 +1261,30 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         case "move": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/move");
           if (!params.newSection && !params.section) throw new Error("Missing 'newSection' or 'section' parameter for memory/move");
-          return { content: [{ type: "text", text: await handleMove(params.id, params.newSection ?? params.section ?? "User", params.newTitle) }], details: {} };
+          if (!ctx.hasUI) {
+            return { content: [{ type: "text", text: "Move cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
+          }
+          const targetSection = params.newSection ?? params.section ?? "User";
+          const ok = await ctx.ui.confirm("Memory vault — Confirm move", `Move "${params.id}" to section "${targetSection}"${params.newTitle ? ` and rename to "${params.newTitle}"` : ""}?`);
+          if (!ok) return { content: [{ type: "text", text: "Move cancelled by user." }], details: {} };
+          return { content: [{ type: "text", text: await handleMove(params.id, targetSection, params.newTitle) }], details: {} };
         }
         case "delete": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/delete");
+          if (!ctx.hasUI) {
+            return { content: [{ type: "text", text: "Delete cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
+          }
+          const ok = await ctx.ui.confirm("Memory vault — Confirm delete", `Permanently delete "${params.id}" from the vault?`);
+          if (!ok) return { content: [{ type: "text", text: "Delete cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleDelete(params.id) }], details: {} };
         }
         case "reorganize": {
           if (!params.operation) throw new Error("Missing 'operation' parameter for memory/reorganize");
+          if (!ctx.hasUI) {
+            return { content: [{ type: "text", text: "Reorganize cancelled: interactive confirmation required but UI is not available." }], details: {}, isError: true };
+          }
+          const ok = await ctx.ui.confirm("Memory vault — Confirm reorganize", `Reorganize: ${params.operation}${params.target ? ` on "${params.target}"` : ""}${params.value ? ` with value "${params.value}"` : ""}?`);
+          if (!ok) return { content: [{ type: "text", text: "Reorganize cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleReorganize(params.operation, params.target, params.value) }], details: {} };
         }
         default:
