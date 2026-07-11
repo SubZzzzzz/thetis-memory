@@ -733,33 +733,42 @@ function isDuplicate(title: string): MemoryEntry | null {
 }
 
 async function saveCandidate(candidate: LearningCandidate): Promise<string> {
-  const today = new Date().toISOString().slice(0, 10);
+  // Refuse oversized content to avoid filling the disk and blocking the TUI.
+  if (candidate.content.length > MAX_CONTENT_CHARS) {
+    throw new Error(
+      `Refusing to save: content is ${candidate.content.length} chars ` +
+        `(max ${MAX_CONTENT_CHARS}).`
+    );
+  }
+
+  const slug = safeSlug(toSlug(candidate.title), candidate.title);
 
   if (candidate.type === "skill") {
-    const skillDir = path.join(MEMORY_DIR, "skills", toSlug(candidate.title));
+    const skillDir = path.join(MEMORY_DIR, "skills", slug);
     ensureDir(skillDir);
     const skillPath = path.join(skillDir, "SKILL.md");
     const fm = {
-      name: toSlug(candidate.title),
+      name: slug,
       description: candidate.reason,
       tags: candidate.tags.length ? candidate.tags : ["skill", "learned"],
     };
     fs.writeFileSync(skillPath, stringifyFrontmatter(fm) + "\n\n" + candidate.content + "\n", "utf8");
     addToMoc(candidate.title, "Skills");
-    return `~/.pi/agent/memory/skills/${toSlug(candidate.title)}/SKILL.md`;
+    return `~/.pi/agent/memory/skills/${slug}/SKILL.md`;
   } else {
-    const sectionDir = path.join(MEMORY_DIR, candidate.section || "User");
+    const section = safeSection(candidate.section);
+    const sectionDir = path.join(MEMORY_DIR, section);
     ensureDir(sectionDir);
-    const filePath = path.join(sectionDir, `${toSlug(candidate.title)}.md`);
+    const filePath = path.join(sectionDir, `${slug}.md`);
     const fm: Record<string, unknown> = {
-      id: toSlug(candidate.title),
+      id: slug,
       title: candidate.title,
       tags: candidate.tags.length ? candidate.tags : ["learned"],
-      updated: today,
+      updated: new Date().toISOString().slice(0, 10),
     };
     fs.writeFileSync(filePath, stringifyFrontmatter(fm) + "\n\n" + candidate.content + "\n", "utf8");
-    addToMoc(candidate.title, candidate.section || "User");
-    return `~/.pi/agent/memory/${candidate.section || "User"}/${toSlug(candidate.title)}.md`;
+    addToMoc(candidate.title, section);
+    return `~/.pi/agent/memory/${section}/${slug}.md`;
   }
 }
 
@@ -926,24 +935,7 @@ const MemoryParams = Type.Object({
 });
 
 async function handleRead(id: string): Promise<string> {
-  const entries = scanVault();
-  const normalizedId = id.toLowerCase().trim();
-  const slugId = normalizedId.replace(/[\s_]+/g, "-");
-
-  let entry = entries.find((e) => e.id.toLowerCase() === normalizedId);
-  if (!entry) entry = entries.find((e) => e.title.toLowerCase() === normalizedId);
-  if (!entry) {
-    entry = entries.find(
-      (e) =>
-        e.id.toLowerCase().replace(/[\s_]+/g, "-") === slugId ||
-        e.title.toLowerCase().replace(/[\s_]+/g, "-") === slugId
-    );
-  }
-  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalizedId));
-  if (!entry) {
-    entry = entries.find((e) => path.basename(e.relPath, ".md").toLowerCase() === normalizedId);
-  }
-
+  const entry = findEntry(id);
   if (!entry) {
     return `Memory not found: "${id}". Use memory/list or memory/search to discover available memories.`;
   }
@@ -989,14 +981,12 @@ async function handleSearch(query: string): Promise<string> {
 }
 
 async function handleMove(id: string, newSection: string, newTitle?: string): Promise<string> {
-  const entries = scanVault();
-  const normalizedId = id.toLowerCase().trim();
-  let entry = entries.find((e) => e.id.toLowerCase() === normalizedId || e.title.toLowerCase() === normalizedId);
-  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalizedId));
+  const entry = findEntry(id);
   if (!entry) return `Memory not found: "${id}".`;
 
   const finalTitle = newTitle ? newTitle.trim() : entry.title;
-  const slug = toSlug(finalTitle);
+  const slug = safeSlug(toSlug(finalTitle), finalTitle);
+  const targetSection = safeSection(newSection || entry.section);
 
   let newAbsPath: string;
   let newRelPath: string;
@@ -1008,7 +998,7 @@ async function handleMove(id: string, newSection: string, newTitle?: string): Pr
     newAbsPath = path.join(newSkillDir, "SKILL.md");
     newRelPath = `skills/${slug}/SKILL.md`;
   } else {
-    const destDir = path.join(MEMORY_DIR, newSection || entry.section || "User");
+    const destDir = path.join(MEMORY_DIR, targetSection);
     ensureDir(destDir);
     newAbsPath = path.join(destDir, `${slug}.md`);
     newRelPath = path.relative(MEMORY_DIR, newAbsPath);
@@ -1025,15 +1015,12 @@ async function handleMove(id: string, newSection: string, newTitle?: string): Pr
   }
   fs.writeFileSync(newAbsPath, stringifyFrontmatter(frontmatter) + "\n\n" + body, "utf8");
 
-  renameInMoc(entry.title, finalTitle, newSection || entry.section);
+  renameInMoc(entry.title, finalTitle, targetSection);
   return `Moved "${entry.title}" → ${newRelPath}`;
 }
 
 async function handleDelete(id: string): Promise<string> {
-  const entries = scanVault();
-  const normalizedId = id.toLowerCase().trim();
-  let entry = entries.find((e) => e.id.toLowerCase() === normalizedId || e.title.toLowerCase() === normalizedId);
-  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalizedId));
+  const entry = findEntry(id);
   if (!entry) return `Memory not found: "${id}".`;
 
   if (entry.relPath.startsWith("skills/")) {
@@ -1050,42 +1037,50 @@ async function handleDelete(id: string): Promise<string> {
 async function handleReorganize(operation: string, target?: string, value?: string): Promise<string> {
   if (operation === "rename_section") {
     if (!target || !value) return "Missing target (old section) or value (new section) for rename_section.";
+    const newSection = safeSection(value);          // validate the NEW section name
+    const oldSection = safeSection(target);          // validate the OLD section name
     const entries = scanVault();
-    const toRename = entries.filter((e) => e.section.toLowerCase() === target.toLowerCase() && !e.relPath.startsWith("skills/"));
+    const toRename = entries.filter((e) => e.section.toLowerCase() === oldSection.toLowerCase() && !e.relPath.startsWith("skills/"));
     for (const e of toRename) {
-      const newPath = path.join(MEMORY_DIR, value, path.basename(e.relPath));
+      const newPath = path.join(MEMORY_DIR, newSection, path.basename(e.relPath));
       ensureDir(path.dirname(newPath));
       if (fs.existsSync(e.absPath)) fs.renameSync(e.absPath, newPath);
       const content = fs.readFileSync(newPath, "utf8");
       const { frontmatter, body } = parseFrontmatter(content);
-      frontmatter.section = value;
+      frontmatter.section = newSection;
       fs.writeFileSync(newPath, stringifyFrontmatter(frontmatter) + "\n\n" + body, "utf8");
     }
-    const oldDir = path.join(MEMORY_DIR, target);
+    const oldDir = path.join(MEMORY_DIR, oldSection);
     if (fs.existsSync(oldDir)) {
       try { fs.rmdirSync(oldDir); } catch {}
     }
-    renameSectionInMoc(target, value);
-    return `Renamed section "${target}" → "${value}".`;
+    renameSectionInMoc(oldSection, newSection);
+    return `Renamed section "${oldSection}" → "${newSection}".`;
   }
 
   if (operation === "merge_sections") {
     if (!target || !value) return "Missing target (destination section) or value (source section) for merge_sections.";
-    const srcDir = path.join(MEMORY_DIR, value);
-    const tgtDir = path.join(MEMORY_DIR, target);
+    const targetSection = safeSection(target);       // destination (validated)
+    const sourceSection = safeSection(value);        // source (validated)
+    if (sourceSection.toLowerCase() === targetSection.toLowerCase()) {
+      return `Source and destination sections are the same ("${targetSection}").`;
+    }
+    const srcDir = path.join(MEMORY_DIR, sourceSection);
+    const tgtDir = path.join(MEMORY_DIR, targetSection);
     if (fs.existsSync(srcDir)) {
       ensureDir(tgtDir);
       for (const file of fs.readdirSync(srcDir)) {
         const srcPath = path.join(srcDir, file);
         const tgtPath = path.join(tgtDir, file);
         if (fs.existsSync(srcPath) && fs.statSync(srcPath).isFile()) {
-          fs.renameSync(srcPath, tgtPath);
+          // Avoid silent overwrites: if the target file already exists, skip it.
+          if (!fs.existsSync(tgtPath)) fs.renameSync(srcPath, tgtPath);
         }
       }
       fs.rmSync(srcDir, { recursive: true, force: true });
     }
-    mergeSectionsInMoc(value, target);
-    return `Merged section "${value}" into "${target}".`;
+    mergeSectionsInMoc(sourceSection, targetSection);
+    return `Merged section "${sourceSection}" into "${targetSection}".`;
   }
 
   if (operation === "reorder_items") {
@@ -1222,6 +1217,105 @@ function pushNotification(text: string, ctx: ExtensionContext) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Validation & Confirmation                                          */
+/* ------------------------------------------------------------------ */
+
+const MAX_CONTENT_CHARS = 100_000; // 100 KB per file
+const MAX_SECTION_LENGTH = 64;
+const MAX_SLUG_LENGTH = 64;
+
+/**
+ * Validates a user-supplied section name. Rejects path traversal and
+ * characters that would let the caller escape MEMORY_DIR. Returns the
+ * trimmed name on success, throws on rejection.
+ */
+function safeSection(s: string | undefined, fallback: string = "User"): string {
+  if (!s) return fallback;
+  const trimmed = s.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.includes("/") ||
+    trimmed.includes("\\") ||
+    trimmed.includes("\0") ||
+    trimmed.includes("..") ||
+    trimmed.startsWith(".") ||
+    /[\x00-\x1f]/.test(trimmed) ||
+    trimmed.length > MAX_SECTION_LENGTH
+  ) {
+    throw new Error(
+      `Invalid section name: "${s}". Sections must be a single path segment ` +
+        `(no "/", "\\", "..", or control chars), not start with ".", and be at most ${MAX_SECTION_LENGTH} chars.`
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Validates a slug used as a filename. Rejects empty, dot-prefixed, and
+ * over-long slugs to prevent hidden files and path injection.
+ */
+function safeSlug(slug: string, originalTitle: string): string {
+  if (!slug) {
+    throw new Error(`Cannot derive a valid filename from title "${originalTitle}".`);
+  }
+  if (slug.startsWith(".")) {
+    throw new Error(`Title "${originalTitle}" produces a hidden filename "${slug}".`);
+  }
+  if (slug.length > MAX_SLUG_LENGTH) {
+    throw new Error(
+      `Title "${originalTitle}" produces a filename longer than ${MAX_SLUG_LENGTH} chars.`
+    );
+  }
+  return slug;
+}
+
+/**
+ * Resolves a user-supplied id/title to a vault entry, using the same
+ * matching strategy as memory/read (exact, slug-normalized, includes, basename).
+ */
+function findEntry(idOrTitle: string): MemoryEntry | null {
+  const entries = scanVault();
+  const normalized = idOrTitle.toLowerCase().trim();
+  const slugId = normalized.replace(/[\s_]+/g, "-");
+
+  let entry = entries.find(
+    (e) => e.id.toLowerCase() === normalized || e.title.toLowerCase() === normalized
+  );
+  if (!entry) {
+    entry = entries.find(
+      (e) =>
+        e.id.toLowerCase().replace(/[\s_]+/g, "-") === slugId ||
+        e.title.toLowerCase().replace(/[\s_]+/g, "-") === slugId
+    );
+  }
+  if (!entry) entry = entries.find((e) => e.title.toLowerCase().includes(normalized));
+  if (!entry)
+    entry = entries.find((e) => path.basename(e.relPath, ".md").toLowerCase() === normalized);
+  return entry ?? null;
+}
+
+/**
+ * Asks the user to confirm a sensitive action. Routes through the gateway
+ * extension (Discord/WhatsApp) if `__gatewayConfirm` is exposed, otherwise
+ * falls back to the TUI dialog. Refuses (returns false) when no UI is
+ * available or the gateway handler fails.
+ */
+async function confirmAction(ctx: ExtensionContext, question: string): Promise<boolean> {
+  const gatewayConfirm = (globalThis as any).__gatewayConfirm;
+  if (typeof gatewayConfirm === "function") {
+    try {
+      return Boolean(await gatewayConfirm(question));
+    } catch {
+      // Gateway handler failed — fall through to TUI.
+    }
+  }
+  if (ctx.hasUI) {
+    return await ctx.ui.confirm("Memory vault — Confirm action", question);
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Extension factory                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -1233,30 +1327,19 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     name: "memory",
     label: "Memory",
     description:
-      "Access and manage the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content\n- move: move a memory to a different section (optionally rename) — requires interactive user confirmation\n- delete: permanently remove a memory from the vault — requires interactive user confirmation\n- reorganize: rename sections, merge sections, or reorder items within a section — requires interactive user confirmation",},{
+      "Access and manage the structured knowledge vault (Obsidian-compatible Markdown files).\n\nActions:\n- read: load the full content of a memory by id or title\n- list: list memory titles, optionally filtered by section\n- search: find memories matching the query in titles, tags, or content\n- move: move a memory to a different section (optionally rename) — requires interactive user confirmation\n- delete: permanently remove a memory from the vault — requires interactive user confirmation\n- reorganize: rename sections, merge sections, or reorder items within a section — requires interactive user confirmation",
     promptSnippet: "Read, list, search, move, delete, or reorganize the global knowledge vault",
     promptGuidelines: [
       "Use memory/read to load the full content of a known memory when its details are needed for the current task.",
       "Use memory/search to find relevant memories when you are unsure which one applies.",
       "Use memory/list to explore available memories by section.",
-      "Use memory/move to relocate or rename a memory. The user will be asked to confirm before the change is applied.",
-      "Use memory/delete to permanently remove a memory. The user will be asked to confirm before the deletion is applied.",
-      "Use memory/reorganize to restructure sections or reorder the vault layout. The user will be asked to confirm before the change is applied.",
+      "Use memory/move to relocate or rename a memory. The exact target is shown to the user before the change is applied.",
+      "Use memory/delete to permanently remove a memory. The exact target is shown to the user before the deletion is applied.",
+      "Use memory/reorganize to restructure sections or reorder the vault layout. Section names are validated against path traversal before any change is applied.",
     ],
     parameters: MemoryParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      async function confirmAction(question: string): Promise<boolean> {
-        const gatewayConfirm = (globalThis as any).__gatewayConfirm;
-        if (typeof gatewayConfirm === "function") {
-          return await gatewayConfirm(question);
-        }
-        if (ctx.hasUI) {
-          return await ctx.ui.confirm("Memory vault — Confirm action", question);
-        }
-        return false;
-      }
-
       switch (params.action) {
         case "read": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/read");
@@ -1272,20 +1355,59 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         case "move": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/move");
           if (!params.newSection && !params.section) throw new Error("Missing 'newSection' or 'section' parameter for memory/move");
-          const targetSection = params.newSection ?? params.section ?? "User";
-          const ok = await confirmAction(`Move "${params.id}" to section "${targetSection}"${params.newTitle ? ` and rename to "${params.newTitle}"` : ""}?`);
+          // Resolve the entry *before* confirming so the dialog shows the exact
+          // memory that will be moved (not the raw, possibly ambiguous, id).
+          const entry = findEntry(params.id);
+          if (!entry) {
+            return { content: [{ type: "text", text: `Memory not found: "${params.id}".` }], details: {}, isError: true };
+          }
+          // Validate the destination section up front so the confirmation and
+          // the actual move use the same sanitized value.
+          let targetSection: string;
+          try {
+            targetSection = safeSection(params.newSection || params.section);
+          } catch (e: any) {
+            return { content: [{ type: "text", text: e.message }], details: {}, isError: true };
+          }
+          const renameSuffix = params.newTitle ? ` and rename to "${params.newTitle}"` : "";
+          const ok = await confirmAction(
+            ctx,
+            `Move "${entry.title}" (${entry.relPath}) to section "${targetSection}"${renameSuffix}?`
+          );
           if (!ok) return { content: [{ type: "text", text: "Move cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleMove(params.id, targetSection, params.newTitle) }], details: {} };
         }
         case "delete": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/delete");
-          const ok = await confirmAction(`Permanently delete "${params.id}" from the vault?`);
+          // Resolve the entry *before* confirming so the dialog shows the exact
+          // memory that will be deleted (not the raw, possibly ambiguous, id).
+          const entry = findEntry(params.id);
+          if (!entry) {
+            return { content: [{ type: "text", text: `Memory not found: "${params.id}".` }], details: {}, isError: true };
+          }
+          const ok = await confirmAction(
+            ctx,
+            `Permanently delete "${entry.title}" (${entry.relPath}) from the vault?`
+          );
           if (!ok) return { content: [{ type: "text", text: "Delete cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleDelete(params.id) }], details: {} };
         }
         case "reorganize": {
           if (!params.operation) throw new Error("Missing 'operation' parameter for memory/reorganize");
-          const ok = await confirmAction(`Reorganize: ${params.operation}${params.target ? ` on "${params.target}"` : ""}${params.value ? ` with value "${params.value}"` : ""}?`);
+          // For filesystem-touching operations, validate section names up front
+          // so a malicious or malformed value never reaches path.join.
+          if (params.operation === "rename_section" || params.operation === "merge_sections") {
+            try {
+              if (params.target) safeSection(params.target);
+              if (params.value) safeSection(params.value);
+            } catch (e: any) {
+              return { content: [{ type: "text", text: e.message }], details: {}, isError: true };
+            }
+          }
+          const ok = await confirmAction(
+            ctx,
+            `Reorganize: ${params.operation}${params.target ? ` on "${params.target}"` : ""}${params.value ? ` with value "${params.value}"` : ""}?`
+          );
           if (!ok) return { content: [{ type: "text", text: "Reorganize cancelled by user." }], details: {} };
           return { content: [{ type: "text", text: await handleReorganize(params.operation, params.target, params.value) }], details: {} };
         }
@@ -1300,11 +1422,11 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     name: "learn_wizard",
     label: "Learn Wizard",
     description:
-      "Interactive wizard to extract and save learning candidates from the session into the global memory vault.\n\nActions:\n- run: analyze recent session messages, extract candidates, then present an interactive wizard to review and save them one by one.\n- save: directly save a provided candidate without wizard interaction.",
+      "Interactive wizard to extract and save learning candidates from the session into the global memory vault.\n\nActions:\n- run: analyze recent session messages, extract candidates, then present an interactive wizard to review and save them one by one.\n- save: directly save a provided candidate. Requires interactive user confirmation (type, title, section, and a content preview are shown before write).",
     promptSnippet: "Extract and save new knowledge to the memory vault",
     promptGuidelines: [
-      "Use learn_wizard/run when the user says something worth remembering (preferences, conventions, procedures, facts).",
-      "Use learn_wizard/save when you already have a well-formed candidate and want to save it directly.",
+      "Use learn_wizard/run when the user says something worth remembering (preferences, conventions, procedures, facts). A model must be configured with /model first.",
+      "Use learn_wizard/save when you already have a well-formed candidate and want to save it directly. The user will be asked to confirm before anything is written.",
     ],
     parameters: LearnWizardParams,
 
@@ -1319,7 +1441,44 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
       if (params.action === "save") {
         if (!params.candidate) throw new Error("Missing 'candidate' parameter for learn_wizard/save");
-        const savedPath = await saveCandidate(params.candidate as LearningCandidate);
+        const candidate = params.candidate as LearningCandidate;
+
+        // Validate up front: refuse unsafe section names or oversized content
+        // before bothering the user with a confirmation dialog.
+        let section: string;
+        try {
+          section = safeSection(candidate.section);
+          if (candidate.content.length > MAX_CONTENT_CHARS) {
+            return {
+              content: [{ type: "text", text: `Refusing to save: content is ${candidate.content.length} chars (max ${MAX_CONTENT_CHARS}).` }],
+              details: {},
+              isError: true,
+            };
+          }
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], details: {}, isError: true };
+        }
+
+        // Compute the target path so the confirmation message is unambiguous.
+        const slug = toSlug(candidate.title);
+        const preview = candidate.type === "skill"
+          ? `~/.pi/agent/memory/skills/${slug}/SKILL.md`
+          : `~/.pi/agent/memory/${section}/${slug}.md`;
+        const contentPreview = candidate.content.length > 240
+          ? candidate.content.slice(0, 240) + "…"
+          : candidate.content;
+        const tagList = candidate.tags.length ? candidate.tags.join(", ") : "(none)";
+
+        const ok = await confirmAction(
+          ctx,
+          `Save ${candidate.type.toUpperCase()} "${candidate.title}" → ${preview}\n` +
+            `Section: ${section}\n` +
+            `Tags: ${tagList}\n\n` +
+            `---\n${contentPreview}\n---`
+        );
+        if (!ok) return { content: [{ type: "text", text: "Save cancelled by user." }], details: {} };
+
+        const savedPath = await saveCandidate(candidate);
         return { content: [{ type: "text", text: `Saved to ${savedPath}` }], details: {} };
       }
 
