@@ -7,15 +7,22 @@ Extension globale de mémoire pour **Pi** (Thetis). Fournit un vault Markdown (c
 - **Vault global** — fichiers Markdown avec frontmatter YAML dans `~/.pi/agent/memory/`
 - **Outil `memory`** — actions `read`, `list`, `search`, `move`, `delete`, `reorganize`
 - **Outil `learn_wizard`** — extraction LLM des messages de session + wizard interactif de sauvegarde
-- **Contexte automatique** — le MOC (`MOC.md`) est injecté dans le system prompt à chaque tour
+- **Contexte automatique** — le MOC (`MOC.md`) est injecté (sous forme de carte compacte) dans le system prompt à chaque tour
 - **Skills intégrés** — les dossiers `~/.pi/agent/memory/skills/*/SKILL.md` sont découverts comme skills Pi natifs
 - **Auto-save des sessions** — chaque session est archivée automatiquement à chaque tour et à la fermeture
 - **Historique des sessions** — commande `/session-history` pour lister et restaurer une session précédente
 - **Auto-cleanup** — suppression automatique des archives de session inactives depuis plus de 48h
 - **Notifications TUI** — widget au-dessus de l'éditeur quand un outil memory est utilisé
-- **Gateway cross-extension** — si `thetis-gateway` est installé, les confirmations d'actions sensibles (delete, move, reorganize) sont relayées sous forme de boutons Discord ou menu WhatsApp
+- **Gateway cross-extension** — si `thetis-gateway` est installé, les confirmations d'actions sensibles sont relayées sous forme de boutons Discord ou menu WhatsApp
+- **Validation stricte des sections** — tous les chemins sont validés contre le path traversal
 
 ## Installation
+
+### Prérequis
+
+- **Node.js ≥ 18** (ou Bun)
+- **Pi** ≥ 0.80 (`@earendil-works/pi-coding-agent`)
+- Pour `learn_wizard/run` : un modèle doit être configuré avec `/model` (sinon l'extraction échoue avec « No model configured »)
 
 ### Via `pi install` (recommandé)
 
@@ -51,15 +58,17 @@ git clone https://github.com/SubZzzzzz/thetis-memory.git ~/.pi/agent/extensions/
 ├── User/
 │   └── i-prefer-dark-mode.md
 ├── Sessions/
-│   └── react_api_2026_07_08_a1b2c3d4.jsonl
-└── skills/
+│   └── react_api_a1b2c3d4.jsonl
+└── skills/                          # Note : minuscule !
     └── deploy-api/
         └── SKILL.md
 ```
 
+> **Note** : le dossier des skills est `skills/` (minuscule), tandis que les autres sections (`Conventions/`, `User/`) sont en `PascalCase`. Le MOC référence ces sections par leur nom d'affichage.
+
 ### MOC.md
 
-Index du vault avec liens Obsidian `[[Titre]]` :
+Index du vault avec liens Obsidian `[[Titre]]`. Le fichier est **régénéré** à chaque modification du vault : toute édition manuelle (commentaires, ordre custom, sections `## Notes`, etc.) sera écrasée.
 
 ```markdown
 ---
@@ -134,7 +143,7 @@ L'agent connaît automatiquement les mémoires disponibles grâce au contexte in
   newTitle?: string,     // renommage move
   operation?: "rename_section" | "merge_sections" | "reorder_items",
   target?: string,       // cible reorganize
-  value?: string         // valeur reorganize
+  value?: string         // valeur reorganize (nouveau nom, source du merge, ou ordre CSV)
 }
 ```
 
@@ -145,18 +154,22 @@ Les actions **destructives ou structurantes** (`move`, `delete`, `reorganize`) n
 - **Avec thetis-gateway** : boutons Discord interactifs ou menu WhatsApp
 - **Sans UI** : l'action est annulée
 
+Avant la confirmation, l'extension **résout l'identifiant** fourni (via `read`) pour afficher dans le message la cible exacte (`title` et `relPath`). Cela évite les suppressions/déplacements ambigus basés sur des matches partiels.
+
+**Règles de validation des sections** : un nom de section ne peut pas contenir `/`, `\`, `..`, commencer par `.`, ni dépasser 64 caractères. Tout nom invalide est **rejeté avec une erreur explicite** avant même la confirmation.
+
 ## Outil `learn_wizard`
 
 Extraction et sauvegarde de connaissances depuis la session courante.
 
-| Action | Description |
-|--------|-------------|
-| `run` | Analyse les messages récents, extrait des candidats via LLM, puis lance un wizard interactif pour les réviser et sauvegarder un par un |
-| `save` | Sauvegarde directe d'un candidat déjà formé, sans wizard |
+| Action | Description | Confirmation |
+|--------|-------------|--------------|
+| `run` | Analyse les messages récents, extrait des candidats via LLM, puis lance un wizard interactif | Wizard par candidat |
+| `save` | Sauvegarde directe d'un candidat déjà formé | **Toujours** (affiche un preview) |
 
-### Wizard interactif
+### Wizard interactif (action `run`)
 
-Lors d'un `run`, le wizard présente chaque candidat et demande :
+Le wizard présente chaque candidat et demande :
 - `yes` — sauvegarder
 - `no` / `skip` — ignorer
 - `edit` — modifier le titre, section, tags, contenu ou type
@@ -168,14 +181,30 @@ En cas de doublon (titre identique), le wizard propose :
 - `skip` — ignorer
 - `rename` — renommer
 
+### Sauvegarde directe (action `save`)
+
+Avant d'écrire, l'extension :
+1. Valide `section` (rejet du path traversal)
+2. Vérifie la taille de `content` (max 100 KB, voir [Limitations](#limitations))
+3. Affiche un aperçu (type, titre, section, tags, path cible, preview 240 chars du contenu)
+4. Demande confirmation à l'utilisateur
+
 ### Granularité
 
 - `generic` (défaut) — règles larges et réutilisables
 - `specific` — notes concrètes de session
 
+### Limite d'extraction
+
+Les messages de session envoyés à l'API d'extraction sont **tronqués à 15 000 caractères** (les plus récents en priorité, préfixés de `...[truncated]...`).
+
 ### Checkpoint
 
-Le wizard utilise un checkpoint (`~/.pi/agent/memory/.checkpoint.json`) pour ne pas réanalyser les messages déjà traités. Chaque `run` avance le checkpoint.
+Le wizard utilise un checkpoint (`~/.pi/agent/memory/.checkpoint.json`) pour ne pas réanalyser les messages déjà traités. Chaque `run` avance le checkpoint. Pour forcer une ré-analyse complète, supprimez ce fichier.
+
+### Prérequis
+
+`learn_wizard/run` effectue un appel direct à l'API du modèle courant (OpenAI, Anthropic, ou compatible). **Un modèle doit être configuré** avec `/model` avant d'utiliser cette action. Sans modèle, l'erreur `No model configured. Set a model with /model before using /learn.` est levée.
 
 ## Commandes
 
@@ -196,7 +225,7 @@ Liste les sessions archivées et permet d'en restaurer une.
 /session-history
 ```
 
-Les archives sont nommées automatiquement par extraction de mots-clés depuis les messages utilisateur (ex: `react_api_a1b2c3d4.jsonl`).
+Les archives sont nommées automatiquement par extraction de mots-clés depuis les messages utilisateur, suivis de l'identifiant court de session (8 hex chars). Exemple : `react_api_a1b2c3d4.jsonl` (le slug du sujet, `_`, les 8 premiers chars du `sessionId`).
 
 ## Gestion des sessions
 
@@ -205,14 +234,79 @@ Les sessions sont automatiquement archivées dans `~/.pi/agent/memory/Sessions/`
 - Un snapshot est créé à **chaque tour** (`turn_end`) et à la **fermeture** (`session_shutdown`)
 - Les snapshots portent un nom généré à partir du sujet de conversation + identifiant court de session
 - Les archives non utilisées depuis **48h** sont automatiquement supprimées au démarrage d'une nouvelle session
-- Le contenu `thinking` est filtré pour réduire la taille
+- Le contenu `thinking` est **filtré** des archives (uniquement les blocs de réflexion des messages assistant sont retirés ; le reste du contenu, y compris les résultats d'outils, est préservé)
+
+> ⚠️ Les sessions archivées contiennent l'historique complet de la conversation (hors blocs `thinking`). Ne stockez pas d'informations hautement sensibles dans des sessions qui seront archivées.
 
 ## Intégration Gateway
 
 Si `thetis-gateway` est installé et actif :
 - Les outils `memory` et `learn_wizard` fonctionnent depuis Discord et WhatsApp
-- Les actions sensibles (`move`, `delete`, `reorganize`) déclenchent des confirmations interactives sur la plateforme (boutons Discord, liste WhatsApp)
+- Les actions sensibles (`move`, `delete`, `reorganize`, `learn_wizard/save`) déclenchent des confirmations interactives sur la plateforme (boutons Discord, liste WhatsApp)
 - Les résultats des outils sont relayés dans le canal actif
+- Le mécanisme utilise la fonction globale `globalThis.__gatewayConfirm` (avec try/catch + coercion en booléen, fallback sur le TUI si la fonction throw)
+
+## Modèle de sécurité
+
+L'extension applique plusieurs couches de défense :
+
+1. **Validation des chemins** — Tous les noms de sections passent par `safeSection()` qui rejette `/`, `\`, `..`, les préfixes `.`, les caractères de contrôle, et les longueurs > 64 chars. Appliqué dans `saveCandidate`, `handleMove`, `handleReorganize`.
+2. **Validation des slugs** — Les titres sont convertis en slug `[a-z0-9-]` via `toSlug()` puis validés par `safeSlug()` (rejet si vide, préfixé `.`, ou > 64 chars).
+3. **Limite de taille** — Les contenus de plus de 100 KB sont refusés avant l'écriture.
+4. **Confirmation obligatoire** — `move`, `delete`, `reorganize`, et `learn_wizard/save` requièrent une confirmation utilisateur explicite.
+5. **Résolution avant confirmation** — L'identifiant est résolu (title + relPath) avant l'affichage de la confirmation, pour éviter les matches ambigus.
+6. **Validation de la gateway** — `__gatewayConfirm` est validée comme fonction, son retour est coercé en `Boolean`, et toute exception fait retomber sur la confirmation TUI standard.
+7. **Refus en mode sans UI** — Sans UI (mode `--print`, `--json`), les actions destructives sont annulées (retournent « cancelled by user »).
+
+⚠️ **Caveats** :
+- Le contenu des sessions archivées n'est pas chiffré et reste lisible par tout processus ayant accès au système de fichiers.
+- La fonction `__gatewayConfirm` est un point d'extension global : une autre extension compromise pourrait l'écraser. Elle est validée à l'appel mais le contrôle du global lui-même est hors de portée de cette extension.
+- Le parser YAML interne est volontairement simple (ne gère pas les structures imbriquées, multi-lignes, anchors). Une round-trip sur un frontmatter riche peut perdre de l'information.
+
+## Limitations
+
+- **Parser YAML limité** : `parseFrontmatter`/`stringifyFrontmatter` ne gèrent pas les valeurs multi-lignes (`|`/`>`), les objets imbriqués, les anchors, ni les types non-string. Les frontmatters complexes importés d'Obsidian peuvent perdre de l'info à chaque ré-écriture.
+- **Limite d'extraction LLM** : 15 000 caractères (les plus récents en priorité).
+- **Limite de taille par fichier** : 100 KB (`MAX_CONTENT_CHARS`). Les contenus plus gros sont refusés.
+- **I/O synchrones** : `fs.readFileSync` / `fs.writeFileSync` partout. Sur un vault de 200+ fichiers, `buildMemoryContext` à chaque tour peut être perceptible.
+- **MOC.md régénéré** : toute édition manuelle est écrasée au prochain changement.
+- **`archiveSession` à chaque tour** : le fichier de session complet est ré-écrit (filtré) à chaque `turn_end`. Pas de debouncing.
+- **Sections par défaut** : `Conventions`, `User`, `Skills` (mais le dossier `skills/` est en minuscule dans le filesystem).
+- **`__gatewayConfirm`** : mécanisme ad-hoc via `globalThis`, pas d'API Pi officielle. Une autre extension peut écraser ce global.
+- **Globaux mutables** : l'état du widget de notification est en module-scope (non isolé par session).
+- **Pas d'API publique** : le vault ne peut être géré que via le tool `memory` exposé à l'agent. Pas de CLI pour l'édition directe.
+
+## Troubleshooting
+
+### Le tool `memory` semble ne rien faire
+
+Vérifiez que la console ne montre pas d'erreur. Le tool exige une UI (TUI ou RPC gateway) pour les actions destructives. En mode `--print`/`--json`, ces actions retournent « cancelled by user ».
+
+### `/learn` échoue avec « No model configured »
+
+Lancez `/model` et choisissez un modèle (OpenAI, Anthropic, etc.) avant d'utiliser `/learn`. L'extraction a besoin d'un appel LLM.
+
+### Une mémoire importée d'Obsidian perd son frontmatter
+
+Le parser YAML de l'extension est limité. Les valeurs multi-lignes, les objets imbriqués et les anchors YAML ne sont pas préservés lors d'une ré-écriture. Si la mémoire ne doit pas être modifiée, ne la touchez pas via l'agent (utilisez un éditeur externe).
+
+### Le widget TUI ne s'affiche pas
+
+Le widget apparaît au-dessus de l'éditeur uniquement après qu'un outil `memory` ou `learn_wizard` a été exécuté. Si vous êtes en mode `--print`/`--json`, le widget n'est pas visible (pas d'UI).
+
+### Forcer une ré-analyse complète de la session pour `/learn`
+
+```bash
+rm ~/.pi/agent/memory/.checkpoint.json
+```
+
+### Restaurer manuellement une session archivée
+
+Les archives JSONL sont dans `~/.pi/agent/memory/Sessions/`. Utilisez `/session-history` pour les restaurer interactivement, ou copiez le fichier `.jsonl` dans le dossier de sessions de Pi et utilisez `/resume` (cf. doc Pi).
+
+### Récupérer un fichier supprimé par erreur
+
+Les suppressions passent par `fs.unlinkSync` (mémoires) ou `fs.rmSync({recursive: true})` (skills). Il n'y a **pas de corbeille** : si vous avez confirmé un `delete` par erreur, restaurez depuis votre backup système.
 
 ## Fichiers
 
@@ -226,12 +320,28 @@ thetis-memory/
 
 ## Dépendances
 
-Aucune dépendance runtime externe. L'extension utilise uniquement les API internes de Pi et les modules natifs Node.js (`fs`, `path`).
+**Aucune dépendance runtime externe.** L'extension utilise uniquement les API internes de Pi et les modules natifs Node.js (`fs`, `path`, `os`).
 
-Peer dependencies :
-- `@earendil-works/pi-coding-agent`
+Peer dependencies (fournies par Pi) :
+- `@earendil-works/pi-coding-agent` (^0.80)
 - `typebox`
 - `@earendil-works/pi-ai`
+
+## Changelog
+
+### 1.1.0 (sécurité)
+- **FIX CRITIQUE** : `pi.registerTool` était appelé avec deux arguments ; le second (contenant `execute`) était silencieusement ignoré, rendant le tool `memory` non-fonctionnel. Fusionné en un seul argument.
+- **FIX sécurité** : validation `safeSection()` contre le path traversal sur `saveCandidate`, `handleMove`, `handleReorganize` (merge_sections + rename_section).
+- **FIX sécurité** : validation `safeSlug()` pour les titres (rejet de `..`, vide, > 64 chars).
+- **FIX sécurité** : `learn_wizard/save` requiert désormais une confirmation utilisateur avec preview du contenu et du chemin cible.
+- **FIX** : `handleDelete` et `handleMove` résolvent l'identifiant (via `findEntry`) **avant** la confirmation, pour afficher le titre exact et le relPath dans le dialogue.
+- **FIX** : `__gatewayConfirm` enveloppe l'appel dans un `try/catch` et coerce le retour en `Boolean`.
+- **NEW** : limite de taille `MAX_CONTENT_CHARS` (100 KB) appliquée à `saveCandidate` et `learn_wizard/save`.
+- **NEW** : `merge_sections` refuse si source = destination et évite les écrasements silencieux.
+- **NEW** : helper `findEntry()` partagé entre `handleRead`, `handleMove`, `handleDelete`.
+
+### 1.0.0
+- Version initiale : vault, outils `memory` et `learn_wizard`, injection du MOC dans le system prompt, archivage de sessions, intégration gateway.
 
 ## Licence
 
