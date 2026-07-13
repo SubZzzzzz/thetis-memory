@@ -371,6 +371,11 @@ Peer dependencies (fournies par Pi) :
 
 ## Changelog
 
+### 1.2.2 (format skills Pi + MOC LLM)
+- **FIX** : les skills créés par `learn_wizard` respectent désormais le format Pi / Agent Skills : nom normalisé (`a-z0-9-`, max 64), `description` toujours renseignée (max 1024), frontmatter YAML correctement quoté, et corps précédé d’un titre H1.
+- **FIX** : `discoverMemorySkillPaths` ne retourne plus le dossier `skills/` brut, mais uniquement les sous-dossiers contenant un `SKILL.md` valide. Cela évite que Pi tente de charger des fichiers `.md` orphelins à la racine de `skills/` et affiche des conflits `description is required`.
+- **NEW** : après chaque ajout, suppression ou déplacement de mémoire, le MOC est régénéré par le LLM (`updateMocWithLLM`) pour refléter l’organisation actuelle du vault. La mise à jour mécanique reste en fallback, et une sécurité réintègre toute entrée éventuellement oubliée par le modèle.
+
 ### 1.2.1 (protocole de chargement mémoire)
 - **NEW** : `MANDATORY MEMORY LOADING PROTOCOL` injecté avec le MOC dans le system prompt.
 - Le protocole oblige le LLM à scanner le MOC, à invoquer `memory/read` sur les mémoires pertinentes, et à ignorer celles qui n’aident pas à résoudre la demande.

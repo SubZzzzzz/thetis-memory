@@ -100,13 +100,21 @@ function parseFrontmatter(content: string): ParsedMemory {
   return { frontmatter, body };
 }
 
+function yamlQuote(value: string): string {
+  // Keep plain scalars unquoted when safe; quote everything else so the
+  // generated YAML survives colons, commas, hashes and special characters.
+  if (value === "") return '""';
+  if (/^[a-zA-Z0-9_.~/-]+$/.test(value)) return value;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 function stringifyFrontmatter(frontmatter: Record<string, unknown>): string {
   const lines = ["---"];
   for (const [key, value] of Object.entries(frontmatter)) {
     if (Array.isArray(value)) {
-      lines.push(`${key}: [${value.map((v) => `"${v}"`).join(", ")}]`);
+      lines.push(`${key}: [${value.map((v) => yamlQuote(String(v))).join(", ")}]`);
     } else {
-      lines.push(`${key}: ${value}`);
+      lines.push(`${key}: ${yamlQuote(String(value))}`);
     }
   }
   lines.push("---");
@@ -571,13 +579,13 @@ Conversation:
 ${messages}`;
 }
 
-async function callExtractionLLM(
+async function callModel(
   ctx: ExtensionContext,
-  messages: string,
-  granularity: string
-): Promise<LearningCandidate[]> {
+  prompt: string,
+  maxTokens = 4096
+): Promise<string> {
   const model = ctx.model;
-  if (!model) throw new Error("No model configured. Set a model with /model before using /learn.");
+  if (!model) throw new Error("No model configured. Set a model with /model before using this feature.");
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) throw new Error(`Auth error: ${auth.error}`);
@@ -592,7 +600,6 @@ async function callExtractionLLM(
   if (!baseUrl) throw new Error(`Cannot determine API base URL for provider: ${model.provider}`);
 
   const api = (model as any).api ?? "openai-completions";
-  const prompt = buildExtractionPrompt(messages, granularity);
 
   let url: string;
   let body: unknown;
@@ -602,7 +609,7 @@ async function callExtractionLLM(
     url = `${baseUrl}/v1/messages`;
     body = {
       model: model.id,
-      max_tokens: 4096,
+      max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     };
     extractText = (res: any) => res.content?.[0]?.text ?? "";
@@ -638,7 +645,16 @@ async function callExtractionLLM(
   }
 
   const data = await response.json();
-  const text = extractText(data);
+  return extractText(data);
+}
+
+async function callExtractionLLM(
+  ctx: ExtensionContext,
+  messages: string,
+  granularity: string
+): Promise<LearningCandidate[]> {
+  const prompt = buildExtractionPrompt(messages, granularity);
+  const text = await callModel(ctx, prompt, 4096);
 
   let jsonText = text;
   const blockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
@@ -649,6 +665,73 @@ async function callExtractionLLM(
     return parsed.candidates ?? [];
   } catch {
     throw new Error(`Failed to parse extraction response as JSON.\nRaw: ${text.slice(0, 300)}`);
+  }
+}
+
+async function updateMocWithLLM(ctx: ExtensionContext): Promise<void> {
+  const entries = scanVault();
+  const currentMoc = fs.existsSync(MOC_PATH) ? fs.readFileSync(MOC_PATH, "utf8") : "";
+
+  const entryDescriptions = entries
+    .map((e) => {
+      const preview = e.body.replace(/\s+/g, " ").trim().slice(0, 200);
+      return `- [${e.section || "Uncategorized"}] ${e.title} (tags: ${e.tags.join(", ") || "none"})\n  ${preview}`;
+    })
+    .join("\n");
+
+  const prompt = `You are organizing a personal knowledge vault for Pi.
+Update the Map of Content (MOC.md) based on the current memory entries below.
+
+The MOC must use this exact format:
+
+---
+title: Pi Memory
+tags: [moc, memory]
+---
+
+# Memory
+
+## <Section Name>
+- [[Memory Title]]
+
+Rules:
+1. Keep the frontmatter exactly as shown.
+2. Group entries into clear, logical sections. You may create new sections, rename sections, or merge sections as needed.
+3. List each memory as a bullet with an Obsidian-style link: - [[Title]]
+4. Do NOT add descriptions, tags, or extra text after the links.
+5. Ensure each memory appears exactly once.
+6. Return ONLY the MOC content, with no markdown code block wrapper and no explanation.
+
+Current MOC:
+${currentMoc || "(empty)"}
+
+Memory entries:
+${entryDescriptions || "(none)"}
+
+Updated MOC:`;
+
+  const text = await callModel(ctx, prompt, 4096);
+  const cleaned = text
+    .replace(/^```markdown\s*/i, "")
+    .replace(/^```\s*/, "")
+    .replace(/```$/, "")
+    .trim();
+
+  if (!cleaned.startsWith("---") || !cleaned.includes("# Memory")) {
+    throw new Error("LLM response does not look like a valid MOC.");
+  }
+
+  fs.writeFileSync(MOC_PATH, cleaned + "\n", "utf8");
+
+  // Safety net: if the LLM dropped an entry, add it back mechanically.
+  const { sections } = parseMoc(cleaned);
+  const presentTitles = new Set(
+    sections.flatMap((s) => s.items.map((i) => i.title.toLowerCase()))
+  );
+  for (const e of entries) {
+    if (!presentTitles.has(e.title.toLowerCase())) {
+      addToMoc(e.title, e.section || "Uncategorized");
+    }
   }
 }
 
@@ -729,16 +812,38 @@ function buildMessagesForExtraction(ctx: ExtensionContext): { text: string; last
 function toSlug(title: string): string {
   return title
     .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9\s-]+/g, "")
     .trim()
-    .replace(/\s+/g, "-");
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, MAX_SLUG_LENGTH);
+}
+
+function normalizeSkillName(title: string): string {
+  // Pi skill names: lowercase a-z, 0-9, hyphens; no leading/trailing/consecutive hyphens; max 64.
+  return toSlug(title).slice(0, 64);
+}
+
+function buildSkillDescription(candidate: LearningCandidate): string {
+  if (candidate.reason && candidate.reason.trim().length > 0) {
+    return candidate.reason.trim().slice(0, 1024);
+  }
+  const preview = candidate.content.replace(/\s+/g, " ").trim();
+  if (preview.length > 0) {
+    const suffix = preview.length > 200 ? "..." : "";
+    return (preview.slice(0, 200) + suffix).slice(0, 1024);
+  }
+  return "Skill learned from session.";
 }
 
 function isDuplicate(title: string): MemoryEntry | null {
   return scanVault().find((e) => e.title.toLowerCase() === title.toLowerCase()) ?? null;
 }
 
-async function saveCandidate(candidate: LearningCandidate): Promise<string> {
+async function saveCandidate(candidate: LearningCandidate, ctx?: ExtensionContext): Promise<string> {
   // Refuse oversized content to avoid filling the disk and blocking the TUI.
   if (candidate.content.length > MAX_CONTENT_CHARS) {
     throw new Error(
@@ -747,21 +852,27 @@ async function saveCandidate(candidate: LearningCandidate): Promise<string> {
     );
   }
 
-  const slug = safeSlug(toSlug(candidate.title), candidate.title);
-
   if (candidate.type === "skill") {
-    const skillDir = path.join(MEMORY_DIR, "skills", slug);
+    const skillName = normalizeSkillName(candidate.title);
+    safeSlug(skillName, candidate.title); // validates non-empty / not hidden / length
+    const skillDir = path.join(MEMORY_DIR, "skills", skillName);
     ensureDir(skillDir);
     const skillPath = path.join(skillDir, "SKILL.md");
     const fm = {
-      name: slug,
-      description: candidate.reason,
+      name: skillName,
+      description: buildSkillDescription(candidate),
       tags: candidate.tags.length ? candidate.tags : ["skill", "learned"],
     };
-    fs.writeFileSync(skillPath, stringifyFrontmatter(fm) + "\n\n" + candidate.content + "\n", "utf8");
+    // Ensure the skill body starts with an H1 so it matches the Pi skill format.
+    let body = candidate.content.trim();
+    if (!body.startsWith("# ")) {
+      body = `# ${candidate.title}\n\n${body}`;
+    }
+    fs.writeFileSync(skillPath, stringifyFrontmatter(fm) + "\n\n" + body + "\n", "utf8");
     addToMoc(candidate.title, "Skills");
-    return `~/.pi/agent/memory/skills/${slug}/SKILL.md`;
+    return `~/.pi/agent/memory/skills/${skillName}/SKILL.md`;
   } else {
+    const slug = safeSlug(toSlug(candidate.title), candidate.title);
     const section = safeSection(candidate.section);
     const sectionDir = path.join(MEMORY_DIR, section);
     ensureDir(sectionDir);
@@ -875,7 +986,7 @@ async function runWizard(
             skipped++;
             continue;
           }
-          const savedPath = await saveCandidate(candidates[j]);
+          const savedPath = await saveCandidate(candidates[j], ctx);
           ctx.ui.notify(`Saved "${candidates[j].title}" to ${savedPath}`, "success");
           saved++;
         }
@@ -909,7 +1020,7 @@ async function runWizard(
           }
           // overwrite → fall through
         }
-        const savedPath = await saveCandidate(c);
+        const savedPath = await saveCandidate(c, ctx);
         ctx.ui.notify(`Saved "${c.title}" to ${savedPath}`, "success");
         saved++;
         break;
@@ -917,6 +1028,14 @@ async function runWizard(
 
       // Should not reach here
       action = await askSave(ctx, c, i, candidates.length);
+    }
+  }
+
+  if (saved > 0) {
+    try {
+      await updateMocWithLLM(ctx);
+    } catch (e: any) {
+      ctx.ui.notify(`Saved ${saved} item(s), but MOC LLM update failed: ${e.message}`, "warning");
     }
   }
 
@@ -985,17 +1104,20 @@ async function handleSearch(query: string): Promise<string> {
     .join("\n");
 }
 
-async function handleMove(id: string, newSection: string, newTitle?: string): Promise<string> {
+async function handleMove(id: string, newSection: string, newTitle?: string, ctx?: ExtensionContext): Promise<string> {
   const entry = findEntry(id);
   if (!entry) return `Memory not found: "${id}".`;
 
   const finalTitle = newTitle ? newTitle.trim() : entry.title;
-  const slug = safeSlug(toSlug(finalTitle), finalTitle);
+  const isSkill = entry.relPath.startsWith("skills/");
+  const slug = isSkill
+    ? normalizeSkillName(finalTitle)
+    : safeSlug(toSlug(finalTitle), finalTitle);
   const targetSection = safeSection(newSection || entry.section);
 
   let newAbsPath: string;
   let newRelPath: string;
-  if (entry.relPath.startsWith("skills/")) {
+  if (isSkill) {
     const oldSkillDir = path.dirname(entry.absPath);
     const newSkillDir = path.join(MEMORY_DIR, "skills", slug);
     ensureDir(path.dirname(newSkillDir));
@@ -1013,7 +1135,7 @@ async function handleMove(id: string, newSection: string, newTitle?: string): Pr
   const content = fs.readFileSync(newAbsPath, "utf8");
   const { frontmatter, body } = parseFrontmatter(content);
   if (newTitle) frontmatter.title = finalTitle;
-  if (entry.relPath.startsWith("skills/")) {
+  if (isSkill) {
     frontmatter.name = slug;
   } else {
     frontmatter.id = slug;
@@ -1021,10 +1143,19 @@ async function handleMove(id: string, newSection: string, newTitle?: string): Pr
   fs.writeFileSync(newAbsPath, stringifyFrontmatter(frontmatter) + "\n\n" + body, "utf8");
 
   renameInMoc(entry.title, finalTitle, targetSection);
+
+  if (ctx) {
+    try {
+      await updateMocWithLLM(ctx);
+    } catch {
+      // Mechanical MOC update is already done; ignore LLM failure.
+    }
+  }
+
   return `Moved "${entry.title}" → ${newRelPath}`;
 }
 
-async function handleDelete(id: string): Promise<string> {
+async function handleDelete(id: string, ctx?: ExtensionContext): Promise<string> {
   const entry = findEntry(id);
   if (!entry) return `Memory not found: "${id}".`;
 
@@ -1036,6 +1167,15 @@ async function handleDelete(id: string): Promise<string> {
   }
 
   removeFromMoc(entry.title, entry.section);
+
+  if (ctx) {
+    try {
+      await updateMocWithLLM(ctx);
+    } catch {
+      // Mechanical MOC update is already done; ignore LLM failure.
+    }
+  }
+
   return `Deleted "${entry.title}".`;
 }
 
@@ -1165,7 +1305,16 @@ async function runLearnWizard(
 function discoverMemorySkillPaths(): string[] {
   const skillsDir = path.join(MEMORY_DIR, "skills");
   if (!fs.existsSync(skillsDir)) return [];
-  return [skillsDir];
+  const paths: string[] = [];
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const skillMd = path.join(skillsDir, entry.name, "SKILL.md");
+      if (fs.existsSync(skillMd)) {
+        paths.push(path.join(skillsDir, entry.name));
+      }
+    }
+  }
+  return paths;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1383,7 +1532,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
             `Move "${entry.title}" (${entry.relPath}) to section "${targetSection}"${renameSuffix}?`
           );
           if (!ok) return { content: [{ type: "text", text: "Move cancelled by user." }], details: {} };
-          return { content: [{ type: "text", text: await handleMove(params.id, targetSection, params.newTitle) }], details: {} };
+          return { content: [{ type: "text", text: await handleMove(params.id, targetSection, params.newTitle, ctx) }], details: {} };
         }
         case "delete": {
           if (!params.id) throw new Error("Missing 'id' parameter for memory/delete");
@@ -1398,7 +1547,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
             `Permanently delete "${entry.title}" (${entry.relPath}) from the vault?`
           );
           if (!ok) return { content: [{ type: "text", text: "Delete cancelled by user." }], details: {} };
-          return { content: [{ type: "text", text: await handleDelete(params.id) }], details: {} };
+          return { content: [{ type: "text", text: await handleDelete(params.id, ctx) }], details: {} };
         }
         case "reorganize": {
           if (!params.operation) throw new Error("Missing 'operation' parameter for memory/reorganize");
@@ -1468,7 +1617,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         }
 
         // Compute the target path so the confirmation message is unambiguous.
-        const slug = toSlug(candidate.title);
+        const slug = candidate.type === "skill" ? normalizeSkillName(candidate.title) : toSlug(candidate.title);
         const preview = candidate.type === "skill"
           ? `~/.pi/agent/memory/skills/${slug}/SKILL.md`
           : `~/.pi/agent/memory/${section}/${slug}.md`;
@@ -1486,7 +1635,12 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         );
         if (!ok) return { content: [{ type: "text", text: "Save cancelled by user." }], details: {} };
 
-        const savedPath = await saveCandidate(candidate);
+        const savedPath = await saveCandidate(candidate, ctx);
+        try {
+          await updateMocWithLLM(ctx);
+        } catch (e: any) {
+          ctx.ui.notify(`Saved to ${savedPath}, but MOC LLM update failed: ${e.message}`, "warning");
+        }
         return { content: [{ type: "text", text: `Saved to ${savedPath}` }], details: {} };
       }
 

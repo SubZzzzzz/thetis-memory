@@ -1,6 +1,6 @@
 {
   "name": "thetis-memory",
-  "version": "1.0.0",
+  "version": "1.2.2",
   "description": "Global memory vault for Pi with Obsidian-compatible Markdown",
   "keywords": ["pi-package"],
   "pi": {
