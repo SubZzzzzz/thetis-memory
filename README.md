@@ -6,13 +6,14 @@ Extension globale de mémoire pour **Pi** (Thetis). Fournit un vault Markdown (c
 
 - **Vault global** — fichiers Markdown avec frontmatter YAML dans `~/.pi/agent/memory/`
 - **Outil `memory`** — actions `read`, `list`, `search`, `move`, `delete`, `reorganize`
-- **Outil `learn_wizard`** — extraction LLM des messages de session + wizard interactif de sauvegarde
+- **Outil `learn_wizard`** — extraction LLM des messages de session + wizard interactif de sauvegarde (select TUI)
+- **Outil `tui_question`** — wizard TUI global pour confirmations, sélections, saisies texte et éditeur multi-lignes
 - **Contexte automatique** — le MOC (`MOC.md`) est injecté (sous forme de carte compacte) dans le system prompt à chaque tour
 - **Skills intégrés** — les dossiers `~/.pi/agent/memory/skills/*/SKILL.md` sont découverts comme skills Pi natifs
 - **Auto-save des sessions** — chaque session est archivée automatiquement à chaque tour et à la fermeture
 - **Historique des sessions** — commande `/session-history` pour lister et restaurer une session précédente
 - **Auto-cleanup** — suppression automatique des archives de session inactives depuis plus de 48h
-- **Notifications TUI** — widget au-dessus de l'éditeur quand un outil memory est utilisé
+- **Notifications TUI** — widget au-dessus de l'éditeur quand un outil memory, learn_wizard ou tui_question est utilisé
 - **Gateway cross-extension** — si `thetis-gateway` est installé, les confirmations d'actions sensibles sont relayées sous forme de boutons Discord ou menu WhatsApp
 - **Validation stricte des sections** — tous les chemins sont validés contre le path traversal
 
@@ -118,6 +119,33 @@ tags: [skill, learned]
 3. Deploy: `bun run deploy:prod`
 ```
 
+## Outil `tui_question`
+
+Wizard TUI global pour poser des questions interactives à l'utilisateur depuis n'importe quel contexte (outils, scripts, ou l'agent).
+
+| Action | Description | Paramètres requis |
+|--------|-------------|-------------------|
+| `confirm` | Confirmation oui/non | `question` |
+| `select` | Choix dans une liste d'options | `question`, `options` |
+| `input` | Saisie texte courte | `question` |
+| `editor` | Éditeur multi-lignes | `question` |
+
+### Paramètres détaillés
+
+```typescript
+{
+  action: "confirm" | "select" | "input" | "editor",
+  question: string,                    // texte affiché
+  options?: string[],                  // options pour select
+  defaultValue?: string,               // valeur par défaut pour input/editor
+  timeoutSeconds?: number              // timeout (défaut : aucun)
+}
+```
+
+### Retour
+
+Le tool retourne le texte de la réponse (`"yes"`, `"no"`, l'option choisie, le texte saisi, ou `"cancelled"` si l'utilisateur annule). En mode sans UI (`--print`, `--json`), le tool retourne une erreur.
+
 ## Outil `memory`
 
 L'agent connaît automatiquement les mémoires disponibles grâce au contexte injecté. Il peut utiliser le tool `memory` pour lire leur contenu complet ou les gérer.
@@ -169,17 +197,19 @@ Extraction et sauvegarde de connaissances depuis la session courante.
 
 ### Wizard interactif (action `run`)
 
-Le wizard présente chaque candidat et demande :
+Le wizard présente chaque candidat via une **select list TUI** et demande :
 - `yes` — sauvegarder
-- `no` / `skip` — ignorer
-- `edit` — modifier le titre, section, tags, contenu ou type
+- `no` — ignorer
+- `edit` — modifier via un sous-menu (titre, section, tags, contenu ou type)
 - `all` — sauvegarder tous les candidats restants
 - `none` — annuler tout
 
 En cas de doublon (titre identique), le wizard propose :
 - `overwrite` — écraser
 - `skip` — ignorer
-- `rename` — renommer
+- `rename` — renommer (avec input interactif)
+
+> **Amélioration** : le wizard utilise `ctx.ui.select()` au lieu de `ctx.ui.input()` pour toutes les étapes de choix, éliminant les erreurs de frappe et accélérant la navigation clavier.
 
 ### Sauvegarde directe (action `save`)
 
@@ -328,6 +358,12 @@ Peer dependencies (fournies par Pi) :
 - `@earendil-works/pi-ai`
 
 ## Changelog
+
+### 1.2.0 (wizard TUI global)
+- **NEW** : outil `tui_question` — wizard TUI global avec 4 modes : `confirm`, `select`, `input`, `editor`. Utilisable par tout outil ou l'agent pour interagir avec l'utilisateur en TUI.
+- **IMPROVE** : `learn_wizard` utilise désormais `ctx.ui.select()` pour toutes les étapes de choix (save, edit, duplicate, type), remplaçant les prompts texte libres par des listes de sélection navigables au clavier.
+- **IMPROVE** : le widget de notification TUI inclut désormais `tui_question`.
+- **FIX** : suppression des boucles récursives infinies dans `askSave` et `handleDuplicate` en cas de réponse invalide (remplacées par des returns explicites).
 
 ### 1.1.0 (sécurité)
 - **FIX CRITIQUE** : `pi.registerTool` était appelé avec deux arguments ; le second (contenant `execute`) était silencieusement ignoré, rendant le tool `memory` non-fonctionnel. Fusionné en un seul argument.

@@ -773,31 +773,31 @@ async function saveCandidate(candidate: LearningCandidate): Promise<string> {
 }
 
 async function askEdit(ctx: ExtensionContext, candidate: LearningCandidate): Promise<void> {
-  const field = await ctx.ui.input(
-    "What do you want to edit? (title / section / tags / content / type / cancel)",
-    "title"
-  );
-  const f = (field ?? "").trim().toLowerCase();
-  if (f === "cancel" || f === "") return;
+  const field = await ctx.ui.select("What do you want to edit?", [
+    "title",
+    "section",
+    "tags",
+    "content",
+    "type",
+    "cancel",
+  ]);
+  if (!field || field.toLowerCase() === "cancel") return;
 
-  if (f === "title") {
+  if (field === "title") {
     const newVal = await ctx.ui.input("New title:", candidate.title);
     if (newVal) candidate.title = newVal;
-  } else if (f === "section") {
+  } else if (field === "section") {
     const newVal = await ctx.ui.input("New section:", candidate.section);
     if (newVal) candidate.section = newVal;
-  } else if (f === "tags") {
+  } else if (field === "tags") {
     const newVal = await ctx.ui.input("New tags (comma-separated):", candidate.tags.join(", "));
     if (newVal) candidate.tags = newVal.split(",").map((t) => t.trim()).filter(Boolean);
-  } else if (f === "content") {
+  } else if (field === "content") {
     const newVal = await ctx.ui.editor("Edit content:", candidate.content);
     if (newVal) candidate.content = newVal;
-  } else if (f === "type") {
-    const newVal = await ctx.ui.input("New type (memory / skill):", candidate.type);
-    const nv = (newVal ?? "").trim().toLowerCase();
-    if (nv === "memory" || nv === "skill") candidate.type = nv;
-  } else {
-    ctx.ui.notify(`Unknown field "${f}". Options: title, section, tags, content, type, cancel.`, "warning");
+  } else if (field === "type") {
+    const newVal = await ctx.ui.select("New type:", ["memory", "skill"]);
+    if (newVal === "memory" || newVal === "skill") candidate.type = newVal;
   }
 }
 
@@ -805,16 +805,16 @@ async function handleDuplicate(
   ctx: ExtensionContext,
   candidate: LearningCandidate
 ): Promise<"save" | "skip" | "rename"> {
-  const raw = await ctx.ui.input(
-    `A memory titled "${candidate.title}" already exists. What do you want to do? (overwrite / skip / rename)`,
-    "overwrite"
+  const choice = await ctx.ui.select(
+    `A memory titled "${candidate.title}" already exists. What do you want to do?`,
+    ["overwrite", "skip", "rename"]
   );
-  const c = (raw ?? "").trim().toLowerCase();
-  if (c.startsWith("o")) return "save";
-  if (c.startsWith("s")) return "skip";
-  if (c.startsWith("r")) return "rename";
-  ctx.ui.notify(`Unrecognized "${raw}". Use: overwrite, skip, or rename.`, "warning");
-  return handleDuplicate(ctx, candidate);
+  if (!choice) return "skip";
+  const c = choice.toLowerCase();
+  if (c === "overwrite") return "save";
+  if (c === "skip") return "skip";
+  if (c === "rename") return "rename";
+  return "skip";
 }
 
 async function askSave(
@@ -826,21 +826,20 @@ async function askSave(
   const label = candidate.type === "skill" ? "SKILL" : "MEMORY";
   const prompt = `Learning candidate ${index + 1}/${total}:
 [${label}] ${candidate.title} (${candidate.section})
-Reason: ${candidate.reason}
+Reason: ${candidate.reason}`;
 
-Save? (yes / no / edit / skip / all / none)`;
-
-  const raw = await ctx.ui.input(prompt, "");
-  const cleaned = (raw ?? "").trim().toLowerCase();
-
-  if (cleaned.startsWith("y") || cleaned === "save") return "yes";
-  if (cleaned.startsWith("n") || cleaned === "skip") return "no";
-  if (cleaned.startsWith("e")) return "edit";
-  if (cleaned === "all" || cleaned === "save all") return "all";
-  if (cleaned === "none" || cleaned === "discard" || cleaned === "stop") return "none";
-
-  ctx.ui.notify(`Unrecognized "${raw}". Options: yes, no, edit, skip, all, none.`, "warning");
-  return askSave(ctx, candidate, index, total);
+  const choice = await ctx.ui.select(
+    `${prompt}\n\nSave?`,
+    ["yes", "no", "edit", "all", "none"]
+  );
+  if (!choice) return "none";
+  const c = choice.toLowerCase();
+  if (c === "yes") return "yes";
+  if (c === "no") return "no";
+  if (c === "edit") return "edit";
+  if (c === "all") return "all";
+  if (c === "none") return "none";
+  return "no";
 }
 
 async function runWizard(
@@ -1500,6 +1499,81 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     },
   });
 
+  /* ------------------------------------------------------------------ */
+  /*  Tool: tui_question (global TUI wizard)                             */
+  /* ------------------------------------------------------------------ */
+
+  const TuiQuestionParams = Type.Object({
+    action: StringEnum(["confirm", "select", "input", "editor"] as const, { description: "Type of TUI interaction" }),
+    question: Type.String({ description: "Question or prompt text" }),
+    options: Type.Optional(Type.Array(Type.String(), { description: "Options for select action" })),
+    defaultValue: Type.Optional(Type.String({ description: "Default value for input/editor" })),
+    timeoutSeconds: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
+  });
+
+  pi.registerTool({
+    name: "tui_question",
+    label: "TUI Question",
+    description:
+      "Global TUI wizard for interactive user questions and confirmations.\n\nActions:\n- confirm: ask a yes/no confirmation\n- select: ask the user to pick from a list of options\n- input: ask for a single-line text input\n- editor: ask for multi-line text input in an editor",
+    promptSnippet: "Ask the user a question or confirmation via the TUI",
+    promptGuidelines: [
+      "Use tui_question/confirm when you need an explicit yes/no approval before a sensitive action.",
+      "Use tui_question/select when the user must choose one option from a predefined list.",
+      "Use tui_question/input for short free-text answers.",
+      "Use tui_question/editor for longer free-text answers or code.",
+      "Always provide clear, concise question text.",
+    ],
+    parameters: TuiQuestionParams,
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: "text", text: "tui_question requires an interactive or RPC session (UI not available in print/JSON mode)." }],
+          details: {},
+          isError: true,
+        };
+      }
+
+      switch (params.action) {
+        case "confirm": {
+          const ok = await ctx.ui.confirm(params.question, params.options?.[0] || "");
+          return {
+            content: [{ type: "text", text: ok ? "yes" : "no" }],
+            details: { confirmed: ok },
+          };
+        }
+        case "select": {
+          if (!params.options || params.options.length === 0) {
+            throw new Error("Missing 'options' parameter for tui_question/select");
+          }
+          const timeout = params.timeoutSeconds ? params.timeoutSeconds * 1000 : undefined;
+          const choice = await ctx.ui.select(params.question, params.options, timeout ? { timeout } : undefined);
+          return {
+            content: [{ type: "text", text: choice ?? "cancelled" }],
+            details: { choice },
+          };
+        }
+        case "input": {
+          const value = await ctx.ui.input(params.question, params.defaultValue || "");
+          return {
+            content: [{ type: "text", text: value ?? "cancelled" }],
+            details: { value },
+          };
+        }
+        case "editor": {
+          const value = await ctx.ui.editor(params.question, params.defaultValue || "");
+          return {
+            content: [{ type: "text", text: value ?? "cancelled" }],
+            details: { value },
+          };
+        }
+        default:
+          throw new Error(`Unknown tui_question action: ${params.action}`);
+      }
+    },
+  });
+
   // Inject memory map into system prompt
   pi.on("before_agent_start", async (event) => {
     const memoryContext = buildMemoryContext();
@@ -1558,7 +1632,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
   // Notify TUI widget when memory tools are executed
   pi.on("tool_execution_start", async (event, ctx) => {
-    if (event.toolName === "memory" || event.toolName === "learn_wizard") {
+    if (event.toolName === "memory" || event.toolName === "learn_wizard" || event.toolName === "tui_question") {
       const action = (event.args as any)?.action ?? "";
       pushNotification(`${event.toolName}${action ? "/" + action : ""}`, ctx);
     }
