@@ -241,7 +241,13 @@ function buildMemoryContext(): string | null {
     "## Memory map",
     "",
     `The following memories and skills are available in ~/.pi/agent/memory/.`,
-    "Use the memory tool to read their full content when relevant.",
+    "",
+    "MANDATORY MEMORY LOADING PROTOCOL:",
+    "1. Before answering the user, scan the memory map above.",
+    "2. If any memory title, tag, or skill is even remotely relevant to the user's request, you MUST call memory/read to load its full content.",
+    "3. Do NOT rely on titles, do NOT guess. Read relevant memories first, then answer.",
+    "4. If you are unsure which memory applies, use memory/search.",
+    "5. After reading, only keep a memory in your reasoning if its content actually helps solve the user's request. If it does not help, ignore it and do not mention it.",
     "",
   ];
   for (const sec of sections) {
