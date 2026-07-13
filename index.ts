@@ -1303,7 +1303,10 @@ async function confirmAction(ctx: ExtensionContext, question: string): Promise<b
   const gatewayConfirm = (globalThis as any).__gatewayConfirm;
   if (typeof gatewayConfirm === "function") {
     try {
-      return Boolean(await gatewayConfirm(question));
+      const result = await gatewayConfirm(question);
+      if (result) return true;
+      // Gateway returned false (no active thread or user declined).
+      // Fall through to TUI if available so local users still get asked.
     } catch {
       // Gateway handler failed — fall through to TUI.
     }
