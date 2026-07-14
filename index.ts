@@ -251,9 +251,9 @@ function buildMemoryContext(): string | null {
     `The following memories and skills are available in ~/.pi/agent/memory/.`,
     "",
     "MANDATORY MEMORY LOADING PROTOCOL:",
-    "1. Before answering the user, scan the memory map above.",
+    "1. Before beginning your reasoning or thinking process for the user's request, scan the memory map above.",
     "2. If any memory title, tag, or skill is even remotely relevant to the user's request, you MUST call memory/read to load its full content.",
-    "3. Do NOT rely on titles, do NOT guess. Read relevant memories first, then answer.",
+    "3. Do NOT rely on titles, do NOT guess. Read relevant memories first, then reason and answer.",
     "4. If you are unsure which memory applies, use memory/search.",
     "5. After reading, only keep a memory in your reasoning if its content actually helps solve the user's request. If it does not help, ignore it and do not mention it.",
     "",
@@ -579,6 +579,17 @@ Conversation:
 ${messages}`;
 }
 
+function buildOpenAICompatibleUrl(baseUrl: string, suffix: string): string {
+  const url = new URL(baseUrl);
+  const pathname = url.pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/v1")) {
+    url.pathname = pathname + suffix;
+  } else {
+    url.pathname = pathname + "/v1" + suffix;
+  }
+  return url.toString();
+}
+
 async function callModel(
   ctx: ExtensionContext,
   prompt: string,
@@ -614,12 +625,17 @@ async function callModel(
     };
     extractText = (res: any) => res.content?.[0]?.text ?? "";
   } else {
-    url = `${baseUrl}/v1/chat/completions`;
+    // openai-completions, openai-responses, or any OpenAI-compatible endpoint.
+    // Pi's model.baseUrl may already include /v1 (OpenAI, OpenCode Go, Together)
+    // or may not (DeepSeek, some Fireworks configs), so we add /v1 only when absent.
+    const suffix = api === "openai-responses" ? "/responses" : "/chat/completions";
+    url = buildOpenAICompatibleUrl(baseUrl, suffix);
     body = {
       model: model.id,
       messages: [{ role: "user", content: prompt }],
     };
-    extractText = (res: any) => res.choices?.[0]?.message?.content ?? "";
+    extractText = (res: any) =>
+      res.choices?.[0]?.message?.content ?? res.output?.[0]?.content?.[0]?.text ?? "";
   }
 
   const headers: Record<string, string> = {
@@ -641,7 +657,7 @@ async function callModel(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`LLM API error ${response.status}: ${text.slice(0, 300)}`);
+    throw new Error(`LLM API error ${response.status} for ${url}: ${text.slice(0, 300)}`);
   }
 
   const data = await response.json();

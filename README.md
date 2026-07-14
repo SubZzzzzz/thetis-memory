@@ -8,7 +8,7 @@ Extension globale de mémoire pour **Pi** (Thetis). Fournit un vault Markdown (c
 - **Outil `memory`** — actions `read`, `list`, `search`, `move`, `delete`, `reorganize`
 - **Outil `learn_wizard`** — extraction LLM des messages de session + wizard interactif de sauvegarde (select TUI)
 - **Outil `tui_question`** — wizard TUI global pour confirmations, sélections, saisies texte et éditeur multi-lignes
-- **Contexte automatique** — le MOC (`MOC.md`) est injecté dans le system prompt à chaque tour avec un protocole obligeant le LLM à lire les mémoires pertinentes avant de répondre
+- **Contexte automatique** — le MOC (`MOC.md`) est injecté dans le system prompt à chaque tour avec un protocole obligeant le LLM à lire les mémoires pertinentes avant de raisonner
 - **Skills intégrés** — les dossiers `~/.pi/agent/memory/skills/*/SKILL.md` sont découverts comme skills Pi natifs
 - **Auto-save des sessions** — chaque session est archivée automatiquement à chaque tour et à la fermeture
 - **Historique des sessions** — commande `/session-history` pour lister et restaurer une session précédente
@@ -123,9 +123,9 @@ tags: [skill, learned]
 
 Le MOC injecté dans le system prompt contient un **MANDATORY MEMORY LOADING PROTOCOL** qui oblige le modèle à :
 
-1. Scanner la carte des mémoires avant chaque réponse.
+1. Scanner la carte des mémoires avant de commencer son raisonnement sur la demande.
 2. Invoquer `memory/read` sur tout titre, tag ou skill potentiellement pertinent.
-3. Ne pas se fier aux seuls titres ni deviner — lire d’abord, répondre ensuite.
+3. Ne pas se fier aux seuls titres ni deviner — lire d’abord, puis raisonner et répondre.
 4. Utiliser `memory/search` en cas de doute.
 5. Après lecture, ne garder une mémoire dans son raisonnement que si son contenu aide réellement à résoudre la demande.
 
