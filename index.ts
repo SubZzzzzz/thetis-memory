@@ -245,25 +245,38 @@ function buildMemoryContext(): string | null {
   const content = fs.readFileSync(MOC_PATH, "utf8");
   const { sections } = parseMoc(content);
   if (sections.length === 0) return null;
+
+  const skillSection = sections.find((s) => s.name.toLowerCase() === "skills");
+  const nonSkillSections = sections.filter((s) => s.name.toLowerCase() !== "skills");
+
   const lines = [
     "## Memory map",
     "",
     `The following memories and skills are available in ~/.pi/agent/memory/.`,
     "",
     "MANDATORY MEMORY LOADING PROTOCOL:",
-    "1. Before beginning your reasoning or thinking process for the user's request, scan the memory map above.",
-    "2. If any memory title, tag, or skill is even remotely relevant to the user's request, you MUST call memory/read to load its full content.",
-    "3. Do NOT rely on titles, do NOT guess. Read relevant memories first, then reason and answer.",
-    "4. If you are unsure which memory applies, use memory/search.",
-    "5. After reading, only keep a memory in your reasoning if its content actually helps solve the user's request. If it does not help, ignore it and do not mention it.",
+    "1. Before beginning your reasoning or thinking process for the user's request, scan the memory map below.",
+    "2. For items listed under **Skills (native Pi skills)**: these skills are also discovered and loaded natively by Pi. When a skill matches the task, use the native Pi `read` tool to load its SKILL.md file, exactly as you would for any other Pi skill.",
+    "3. For all other memories (Conventions, User, Projects, etc.): if any title or tag is relevant, you MUST call memory/read to load its full content.",
+    "4. Do NOT rely on titles, do NOT guess. Read relevant memories/skills first, then reason and answer.",
+    "5. If you are unsure which memory or skill applies, use memory/search.",
+    "6. After reading, only keep a memory/skill in your reasoning if its content actually helps solve the user's request. If it does not help, ignore it and do not mention it.",
     "",
   ];
-  for (const sec of sections) {
+
+  if (skillSection && skillSection.items.length > 0) {
+    lines.push("### Skills (native Pi skills — read with the Pi `read` tool)", "");
+    for (const item of skillSection.items) lines.push(`- ${item.title}`);
+    lines.push("");
+  }
+
+  for (const sec of nonSkillSections) {
     if (sec.items.length === 0) continue;
-    lines.push(`### ${sec.name}`, "");
+    lines.push(`### ${sec.name} (read with memory/read)`, "");
     for (const item of sec.items) lines.push(`- ${item.title}`);
     lines.push("");
   }
+
   return lines.join("\n");
 }
 
