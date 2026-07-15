@@ -1694,12 +1694,12 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
     name: "tui_question",
     label: "TUI Question",
     description:
-      "Global TUI wizard for interactive user questions and confirmations.\n\nActions:\n- confirm: ask a yes/no confirmation\n- select: ask the user to pick from a list of options\n- input: ask for a single-line text input\n- editor: ask for multi-line text input in an editor",
+      "Global TUI wizard for interactive user questions and confirmations.\n\nActions:\n- confirm: ask a yes/no confirmation\n- select: ask the user to pick from a list of options (an extra '✏️ Autres...' option lets them type a custom answer)\n- input: ask for a single-line text input\n- editor: ask for multi-line text input in an editor",
     promptSnippet: "Ask the user a question or confirmation via the TUI",
     promptGuidelines: [
       "Use tui_question/confirm when you need an explicit yes/no approval before a sensitive action.",
-      "Use tui_question/select when the user must choose one option from a predefined list.",
-      "Use tui_question/input for short free-text answers.",
+      "Use tui_question/select when the user must choose one option from a predefined list. An extra '✏️ Autres...' option is automatically added so the user can type a custom answer.",
+      "Use tui_question/input for short free-text answers without predefined options.",
       "Use tui_question/editor for longer free-text answers or code.",
       "Always provide clear, concise question text.",
     ],
@@ -1727,10 +1727,19 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
             throw new Error("Missing 'options' parameter for tui_question/select");
           }
           const timeout = params.timeoutSeconds ? params.timeoutSeconds * 1000 : undefined;
-          const choice = await ctx.ui.select(params.question, params.options, timeout ? { timeout } : undefined);
+          const customOption = "✏️ Autres...";
+          const displayOptions = [...params.options, customOption];
+          const choice = await ctx.ui.select(params.question, displayOptions, timeout ? { timeout } : undefined);
+          if (choice === customOption) {
+            const custom = await ctx.ui.input("Veuillez écrire votre réponse personnalisée :");
+            return {
+              content: [{ type: "text", text: custom ?? "cancelled" }],
+              details: { choice: custom, wasCustom: true },
+            };
+          }
           return {
             content: [{ type: "text", text: choice ?? "cancelled" }],
-            details: { choice },
+            details: { choice, wasCustom: false },
           };
         }
         case "input": {
