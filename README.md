@@ -44,7 +44,7 @@ pi -e git:github.com/SubZzzzzz/thetis-memory
 mkdir -p ~/.pi/agent/extensions
 
 # Cloner
-git clone https://github.com/SubZzzzzz/thetis-memory.git ~/.pi/agent/extensions/thetis-memory
+git clone https://github.com/SubZzzzzz/thetis-memory.git ~/.pi/agent/git/github.com/SubZzzzzz/thetis-memory
 
 # Relancer Pi ou faire /reload
 ```
