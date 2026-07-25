@@ -1727,9 +1727,23 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         };
       }
 
+      // Detect gateway mode and redirect to gateway_question
+      const gatewayConfirm = (globalThis as any).__gatewayConfirm;
+      if (typeof gatewayConfirm === "function") {
+        return {
+          content: [{ type: "text", text: "ERROR: Gateway session detected (WhatsApp/Discord). Use `gateway_question` tool instead of `tui_question` for user interactions in gateway mode." }],
+          details: {},
+          isError: true,
+        };
+      }
+
       switch (params.action) {
         case "confirm": {
-          const ok = await ctx.ui.confirm(params.question, params.options?.[0] || "");
+          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
+          const ok = await Promise.race([
+            ctx.ui.confirm(params.question, params.options?.[0] || ""),
+            new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error("Timeout: user did not respond within " + params.timeoutSeconds ?? 300 + " seconds")), timeoutMs))
+          ]).catch(() => false);
           return {
             content: [{ type: "text", text: ok ? "yes" : "no" }],
             details: { confirmed: ok },
@@ -1756,14 +1770,22 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
           };
         }
         case "input": {
-          const value = await ctx.ui.input(params.question, params.defaultValue || "");
+          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
+          const value = await Promise.race([
+            ctx.ui.input(params.question, params.defaultValue || ""),
+            new Promise<string | null>((resolve) => setTimeout(() => resolve(null), timeoutMs))
+          ]);
           return {
             content: [{ type: "text", text: value ?? "cancelled" }],
             details: { value },
           };
         }
         case "editor": {
-          const value = await ctx.ui.editor(params.question, params.defaultValue || "");
+          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
+          const value = await Promise.race([
+            ctx.ui.editor(params.question, params.defaultValue || ""),
+            new Promise<string | null>((resolve) => setTimeout(() => resolve(null), timeoutMs))
+          ]);
           return {
             content: [{ type: "text", text: value ?? "cancelled" }],
             details: { value },
