@@ -1727,15 +1727,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         };
       }
 
-      // Check if gateway extension is loaded
-      const gatewayConfirm = (globalThis as any).__gatewayConfirm;
-      if (typeof gatewayConfirm === "function") {
-        return {
-          content: [{ type: "text", text: "DISABLED: tui_question is disabled when thetis-gateway extension is loaded. This avoids ambiguity about which tool to use. The extension will be updated in the future to allow both tools when in TUI mode." }],
-          details: {},
-          isError: true,
-        };
-      }
+
 
       switch (params.action) {
         case "confirm": {
