@@ -1727,11 +1727,11 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
         };
       }
 
-      // Detect gateway mode and redirect to gateway_question
+      // Check if gateway extension is loaded
       const gatewayConfirm = (globalThis as any).__gatewayConfirm;
       if (typeof gatewayConfirm === "function") {
         return {
-          content: [{ type: "text", text: "ERROR: Gateway session detected (WhatsApp/Discord). Use `gateway_question` tool instead of `tui_question` for user interactions in gateway mode." }],
+          content: [{ type: "text", text: "DISABLED: tui_question is disabled when thetis-gateway extension is loaded. This avoids ambiguity about which tool to use. The extension will be updated in the future to allow both tools when in TUI mode." }],
           details: {},
           isError: true,
         };
