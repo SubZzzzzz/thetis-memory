@@ -470,6 +470,13 @@ function generateTopicName(ctx: ExtensionContext): string {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Session topic cache                                                */
+/* ------------------------------------------------------------------ */
+
+// Cache pour figer le topic par sessionId et éviter la multiplication des fichiers
+const sessionTopicCache = new Map<string, string>();
+
+/* ------------------------------------------------------------------ */
 /*  Session archive helpers                                            */
 /* ------------------------------------------------------------------ */
 
@@ -494,11 +501,31 @@ function archiveSession(ctx: ExtensionContext): void {
   if (!sessionFile || !fs.existsSync(sessionFile)) return;
   const sessionId = ctx.sessionManager.getSessionId();
   const sessionName = ctx.sessionManager.getSessionName() || "unnamed";
-  const topicName = generateTopicName(ctx);
+
+  // Récupérer ou calculer le topic (figé pour cette session)
+  let topicName = sessionTopicCache.get(sessionId);
+  if (!topicName) {
+    topicName = generateTopicName(ctx);
+    sessionTopicCache.set(sessionId, topicName);
+  }
+
   const baseName = topicName || sessionName.replace(/[^a-z0-9_\-\s]/gi, "").replace(/\s+/g, "_").slice(0, 40);
   const safeName = baseName.slice(0, 40);
   const fileName = `${safeName}_${sessionId.slice(0, 8)}.jsonl`;
   const destPath = path.join(getSessionsDir(), fileName);
+
+  // Supprimer les anciens fichiers de cette session (même sessionId) pour éviter l'accumulation
+  const sessionPrefix = `_${sessionId.slice(0, 8)}.jsonl`;
+  try {
+    const sessionsDir = getSessionsDir();
+    for (const entry of fs.readdirSync(sessionsDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(sessionPrefix) && entry.name !== fileName) {
+        fs.unlinkSync(path.join(sessionsDir, entry.name));
+      }
+    }
+  } catch {
+    // Ignore cleanup errors
+  }
 
   try {
     const raw = fs.readFileSync(sessionFile, "utf8");
