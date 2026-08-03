@@ -1719,103 +1719,6 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
   });
 
   /* ------------------------------------------------------------------ */
-  /*  Tool: tui_question (global TUI wizard)                             */
-  /* ------------------------------------------------------------------ */
-
-  const TuiQuestionParams = Type.Object({
-    action: StringEnum(["confirm", "select", "input", "editor"] as const, { description: "Type of TUI interaction" }),
-    question: Type.String({ description: "Question or prompt text" }),
-    options: Type.Optional(Type.Array(Type.String(), { description: "Options for select action" })),
-    defaultValue: Type.Optional(Type.String({ description: "Default value for input/editor" })),
-    timeoutSeconds: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
-  });
-
-  pi.registerTool({
-    name: "tui_question",
-    label: "TUI Question",
-    description:
-      "Global TUI wizard for interactive user questions and confirmations.\n\nActions:\n- confirm: ask a yes/no confirmation\n- select: ask the user to pick from a list of options (an extra '✏️ Autres...' option lets them type a custom answer)\n- input: ask for a single-line text input\n- editor: ask for multi-line text input in an editor",
-    promptSnippet: "Ask the user a question or confirmation via the TUI",
-    promptGuidelines: [
-      "Use tui_question/confirm when you need an explicit yes/no approval before a sensitive action.",
-      "Use tui_question/select when the user must choose one option from a predefined list. An extra '✏️ Autres...' option is automatically added so the user can type a custom answer.",
-      "Use tui_question/input for short free-text answers without predefined options.",
-      "Use tui_question/editor for longer free-text answers or code.",
-      "Always provide clear, concise question text.",
-    ],
-    parameters: TuiQuestionParams,
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: "tui_question requires an interactive or RPC session (UI not available in print/JSON mode)." }],
-          details: {},
-          isError: true,
-        };
-      }
-
-
-
-      switch (params.action) {
-        case "confirm": {
-          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
-          const ok = await Promise.race([
-            ctx.ui.confirm(params.question, params.options?.[0] || ""),
-            new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error("Timeout: user did not respond within " + params.timeoutSeconds ?? 300 + " seconds")), timeoutMs))
-          ]).catch(() => false);
-          return {
-            content: [{ type: "text", text: ok ? "yes" : "no" }],
-            details: { confirmed: ok },
-          };
-        }
-        case "select": {
-          if (!params.options || params.options.length === 0) {
-            throw new Error("Missing 'options' parameter for tui_question/select");
-          }
-          const timeout = params.timeoutSeconds ? params.timeoutSeconds * 1000 : undefined;
-          const customOption = "✏️ Autres...";
-          const displayOptions = [...params.options, customOption];
-          const choice = await ctx.ui.select(params.question, displayOptions, timeout ? { timeout } : undefined);
-          if (choice === customOption) {
-            const custom = await ctx.ui.input("Veuillez écrire votre réponse personnalisée :");
-            return {
-              content: [{ type: "text", text: custom ?? "cancelled" }],
-              details: { choice: custom, wasCustom: true },
-            };
-          }
-          return {
-            content: [{ type: "text", text: choice ?? "cancelled" }],
-            details: { choice, wasCustom: false },
-          };
-        }
-        case "input": {
-          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
-          const value = await Promise.race([
-            ctx.ui.input(params.question, params.defaultValue || ""),
-            new Promise<string | null>((resolve) => setTimeout(() => resolve(null), timeoutMs))
-          ]);
-          return {
-            content: [{ type: "text", text: value ?? "cancelled" }],
-            details: { value },
-          };
-        }
-        case "editor": {
-          const timeoutMs = (params.timeoutSeconds ?? 300) * 1000;
-          const value = await Promise.race([
-            ctx.ui.editor(params.question, params.defaultValue || ""),
-            new Promise<string | null>((resolve) => setTimeout(() => resolve(null), timeoutMs))
-          ]);
-          return {
-            content: [{ type: "text", text: value ?? "cancelled" }],
-            details: { value },
-          };
-        }
-        default:
-          throw new Error(`Unknown tui_question action: ${params.action}`);
-      }
-    },
-  });
-
   // Inject memory map into system prompt
   pi.on("before_agent_start", async (event) => {
     const memoryContext = buildMemoryContext();
@@ -1874,7 +1777,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
   // Notify TUI widget when memory tools are executed
   pi.on("tool_execution_start", async (event, ctx) => {
-    if (event.toolName === "memory" || event.toolName === "learn_wizard" || event.toolName === "tui_question") {
+    if (event.toolName === "memory" || event.toolName === "learn_wizard") {
       const action = (event.args as any)?.action ?? "";
       pushNotification(`${event.toolName}${action ? "/" + action : ""}`, ctx);
     }
