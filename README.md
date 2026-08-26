@@ -7,13 +7,12 @@ Extension globale de mémoire pour **Pi** (Thetis). Fournit un vault Markdown (c
 - **Vault global** — fichiers Markdown avec frontmatter YAML dans `~/.pi/agent/memory/`
 - **Outil `memory`** — actions `read`, `list`, `search`, `move`, `delete`, `reorganize`
 - **Outil `learn_wizard`** — extraction LLM des messages de session + wizard interactif de sauvegarde (select TUI)
-- **Outil `tui_question`** — wizard TUI global pour confirmations, sélections, saisies texte et éditeur multi-lignes
 - **Contexte automatique** — le MOC (`MOC.md`) est injecté dans le system prompt à chaque tour avec un protocole obligeant le LLM à lire les mémoires pertinentes avant de raisonner
 - **Skills intégrés** — les dossiers `~/.pi/agent/memory/skills/*/SKILL.md` sont découverts comme skills Pi natifs
 - **Auto-save des sessions** — chaque session est archivée automatiquement à chaque tour et à la fermeture
 - **Historique des sessions** — commande `/session-history` pour lister et restaurer une session précédente
 - **Auto-cleanup** — suppression automatique des archives de session inactives depuis plus de 48h
-- **Notifications TUI** — widget au-dessus de l'éditeur quand un outil memory, learn_wizard ou tui_question est utilisé
+- **Notifications TUI** — widget au-dessus de l'éditeur quand un outil memory ou learn_wizard est utilisé
 - **Gateway cross-extension** — si `thetis-gateway` est installé, les confirmations d'actions sensibles sont relayées sous forme de boutons Discord ou menu WhatsApp
 - **Validation stricte des sections** — tous les chemins sont validés contre le path traversal
 
@@ -129,34 +128,7 @@ Le MOC injecté dans le system prompt contient un **MANDATORY MEMORY LOADING PRO
 4. Utiliser `memory/search` en cas de doute.
 5. Après lecture, ne garder une mémoire dans son raisonnement que si son contenu aide réellement à résoudre la demande.
 
-Ce protocole reste une incitation au niveau du prompt : c’est le LLM qui invoque l’outil, mais de manière beaucoup plus explicite et impérative qu’auparavant.
-
-## Outil `tui_question`
-
-Wizard TUI global pour poser des questions interactives à l'utilisateur depuis n'importe quel contexte (outils, scripts, ou l'agent).
-
-| Action | Description | Paramètres requis |
-|--------|-------------|-------------------|
-| `confirm` | Confirmation oui/non | `question` |
-| `select` | Choix dans une liste d'options | `question`, `options` |
-| `input` | Saisie texte courte | `question` |
-| `editor` | Éditeur multi-lignes | `question` |
-
-### Paramètres détaillés
-
-```typescript
-{
-  action: "confirm" | "select" | "input" | "editor",
-  question: string,                    // texte affiché
-  options?: string[],                  // options pour select
-  defaultValue?: string,               // valeur par défaut pour input/editor
-  timeoutSeconds?: number              // timeout (défaut : aucun)
-}
-```
-
-### Retour
-
-Le tool retourne le texte de la réponse (`"yes"`, `"no"`, l'option choisie, le texte saisi, ou `"cancelled"` si l'utilisateur annule). En mode sans UI (`--print`, `--json`), le tool retourne une erreur.
+Ce protocole reste une incitation au niveau du prompt : c'est le LLM qui invoque l'outil, mais de manière beaucoup plus explicite et impérative qu'auparavant.
 
 ## Outil `memory`
 
@@ -380,10 +352,8 @@ Peer dependencies (fournies par Pi) :
 - **NEW** : `MANDATORY MEMORY LOADING PROTOCOL` injecté avec le MOC dans le system prompt.
 - Le protocole oblige le LLM à scanner le MOC, à invoquer `memory/read` sur les mémoires pertinentes, et à ignorer celles qui n’aident pas à résoudre la demande.
 
-### 1.2.0 (wizard TUI global)
-- **NEW** : outil `tui_question` — wizard TUI global avec 4 modes : `confirm`, `select`, `input`, `editor`. Utilisable par tout outil ou l'agent pour interagir avec l'utilisateur en TUI.
+### 1.2.0 (wizard TUI amélioré)
 - **IMPROVE** : `learn_wizard` utilise désormais `ctx.ui.select()` pour toutes les étapes de choix (save, edit, duplicate, type), remplaçant les prompts texte libres par des listes de sélection navigables au clavier.
-- **IMPROVE** : le widget de notification TUI inclut désormais `tui_question`.
 - **FIX** : suppression des boucles récursives infinies dans `askSave` et `handleDuplicate` en cas de réponse invalide (remplacées par des returns explicites).
 
 ### 1.1.0 (sécurité)
