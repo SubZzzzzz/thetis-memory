@@ -233,22 +233,28 @@ Lance le wizard d'extraction sur la session courante.
 
 ### `/session-history`
 
-Liste les sessions archivées et permet d'en restaurer une.
+Liste les sessions archivées et permet d'en restaurer une. Accepte un argument optionnel pour filtrer par titre.
 
 ```
 /session-history
+/session-history fedora
 ```
 
-Les archives sont nommées automatiquement par extraction de mots-clés depuis les messages utilisateur, suivis de l'identifiant court de session (8 hex chars). Exemple : `react_api_a1b2c3d4.jsonl` (le slug du sujet, `_`, les 8 premiers chars du `sessionId`).
+Les archives sont nommées automatiquement par génération LLM d'un titre descriptif à partir du premier message utilisateur, suivi de l'identifiant court de session (8 hex chars). Exemple : `modification_systeme_sauvegarde_a1b2c3d4.jsonl`.
+
+Le titre est généré une seule fois par session (au premier tour) et persisté dans un fichier `.meta.json` à côté de l'archive JSONL. Si la génération LLM échoue, un nom par défaut lisible est utilisé : `session-2026-01-19T10-30-00_a1b2c3d4.jsonl`.
 
 ## Gestion des sessions
 
 Les sessions sont automatiquement archivées dans `~/.pi/agent/memory/Sessions/` :
 
 - Un snapshot est créé à **chaque tour** (`turn_end`) et à la **fermeture** (`session_shutdown`)
-- Les snapshots portent un nom généré à partir du sujet de conversation + identifiant court de session
-- Les archives non utilisées depuis **48h** sont automatiquement supprimées au démarrage d'une nouvelle session
+- Le titre de l'archive est généré par le **modèle actif** (LLM) à partir du premier message utilisateur
+- Le titre est **fixé définitivement** : généré une seule fois, puis persisté dans un fichier `.meta.json` (ex: `a1b2c3d4.meta.json`)
+- Si la génération LLM échoue, un nom par défaut lisible est utilisé : `session-YYYY-MM-DDTHH-MM-SS`
+- Les archives non utilisées depuis **48h** sont automatiquement supprimées au démarrage d'une nouvelle session (avec leur `.meta.json` associé)
 - Le contenu `thinking` est **filtré** des archives (uniquement les blocs de réflexion des messages assistant sont retirés ; le reste du contenu, y compris les résultats d'outils, est préservé)
+- `/session-history` accepte un argument pour **filtrer par titre** (ex: `/session-history fedora`)
 
 > ⚠️ Les sessions archivées contiennent l'historique complet de la conversation (hors blocs `thinking`). Ne stockez pas d'informations hautement sensibles dans des sessions qui seront archivées.
 
@@ -342,6 +348,14 @@ Peer dependencies (fournies par Pi) :
 - `@earendil-works/pi-ai`
 
 ## Changelog
+
+### 1.3.0 (titres de session LLM)
+- **NEW** : les titres de session sont maintenant générés par le **modèle actif** (LLM) à partir du premier message utilisateur, au lieu d'une extraction algorithmique de mots-clés.
+- **NEW** : le titre est **persisté** dans un fichier `.meta.json` à côté de l'archive JSONL, garantissant qu'il reste stable même après redémarrage de Pi.
+- **NEW** : `/session-history` accepte un argument pour **filtrer par titre** (ex: `/session-history fedora`).
+- **NEW** : fallback lisible si la génération LLM échoue : `session-YYYY-MM-DDTHH-MM-SS` au lieu de `unnamed`.
+- **SUPPRIMÉ** : `STOP_WORDS` et l'algorithme de génération de topic par fréquence.
+- **Coût** : ~70 tokens par session (prompt + réponse), négligeable.
 
 ### 1.2.2 (format skills Pi + MOC LLM)
 - **FIX** : les skills créés par `learn_wizard` respectent désormais le format Pi / Agent Skills : nom normalisé (`a-z0-9-`, max 64), `description` toujours renseignée (max 1024), frontmatter YAML correctement quoté, et corps précédé d’un titre H1.

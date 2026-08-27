@@ -413,68 +413,105 @@ function writeCheckpoint(checkpoint: Checkpoint): void {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Session topic extraction                                           */
+/*  Session title generation (LLM-based)                               */
 /* ------------------------------------------------------------------ */
 
-const STOP_WORDS = new Set([
-  // français
-  "avec","ce","ces","cette","dans","de","des","du","en","et","je","la","le","les","mais","ne","ou","par","pas","pour","que","qui","se","sur","tu","un","une","est","sont","être","avoir","faire","plus","très","tout","tous","toute","toutes","alors","aussi","autre","autres","aux","avant","car","chez","comme","comment","depuis","donc","encore","entre","ici","ils","juste","leur","leurs","lui","même","mes","mien","mon","nos","notre","nous","on","ont","peu","peut","plupart","quand","quel","quelle","quelles","quels","sa","ses","si","son","ta","te","tes","ton","tous","tout","trop","vos","votre","vous","y",
-  // anglais
-  "the","and","for","are","but","not","you","all","any","can","had","her","was","one","our","out","day","get","has","him","his","how","its","may","new","now","old","see","two","way","who","boy","did","she","use","her","now","him","than","them","well","were","what","with","have","from","they","know","want","been","good","much","some","time","very","when","come","here","just","like","long","make","many","over","such","take","than","them","well","were","will","your","this","that","would","there","could","other","after","first","never","these","think","where","being","every","great","might","shall","still","those","under","while","about","should","really","something","going","want","need","please","ok","okay","yes","no","hi","hello","hey","thanks","thank","merci","salut","bonjour","ca","voila","donc","alors",
-]);
-
-function generateTopicName(ctx: ExtensionContext): string {
+function findFirstUserMessage(ctx: ExtensionContext): string {
   const entries = ctx.sessionManager.getEntries();
-  const userTexts: string[] = [];
-
-  // Collecte les 3 derniers messages utilisateur (du plus récent au plus ancien)
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+  for (const entry of entries) {
     if (entry.type !== "message") continue;
     const msg = entry.message;
-    if (msg.role === "user") {
-      const text = msg.content
-        .filter((c): c is { type: "text"; text: string } => c.type === "text")
-        .map((c) => c.text)
-        .join(" ");
-      if (text.trim()) userTexts.unshift(text.trim());
-      if (userTexts.length >= 3) break;
-    }
+    if (msg.role !== "user") continue;
+    const text = msg.content
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join(" ");
+    if (text.trim()) return text.trim();
   }
+  return "";
+}
 
-  if (userTexts.length === 0) return "";
-
-  const combined = userTexts.join(" ");
-  const words = combined
+function slugifyTitle(title: string): string {
+  return title
     .toLowerCase()
-    .replace(/[^a-z0-9àâäéèêëïîôöùûüçœ\s]/gi, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !STOP_WORDS.has(w));
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .replace(/[^a-z0-9\s]/g, "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .slice(0, 40);
+}
 
-  if (words.length === 0) return "";
+async function generateTitleWithLLM(ctx: ExtensionContext, firstUserMessage: string): Promise<string> {
+  const prompt = `Generate a concise title (3-6 words) for this conversation. Reply with ONLY the title, nothing else.\n\nMessage: ${firstUserMessage.slice(0, 500)}`;
+  
+  const raw = await callModel(ctx, prompt, 50);
+  
+  // Post-processing: take first line, strip quotes/punctuation
+  const cleaned = raw
+    .replace(/["'`]/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0) || "";
+  
+  return slugifyTitle(cleaned);
+}
 
-  // Compte la fréquence pour privilégier les mots répétés (sujet fort)
-  const freq = new Map<string, number>();
-  for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
-  const sorted = Array.from(freq.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-
-  // Prend jusqu'à 4 mots, ou moins si le 1er est déjà très représentatif
-  const selected: string[] = [];
-  for (const [word, count] of sorted) {
-    if (selected.length >= 4) break;
-    // Évite les répétitions exactes (même racine gardée car c'est un slug simple)
-    selected.push(word);
+async function generateTopicName(ctx: ExtensionContext): Promise<string> {
+  const firstUserText = findFirstUserMessage(ctx);
+  if (!firstUserText) return "";
+  
+  try {
+    const title = await generateTitleWithLLM(ctx, firstUserText);
+    if (title) return title;
+  } catch {
+    // Silent fallback — will use default timestamp-based name
   }
-
-  return selected.join("_");
+  
+  return "";
 }
 
 /* ------------------------------------------------------------------ */
-/*  Session topic cache                                                */
+/*  Session title cache & persistence                                  */
 /* ------------------------------------------------------------------ */
 
-// Cache pour figer le topic par sessionId et éviter la multiplication des fichiers
+// In-memory cache to avoid regenerating title for the same session
 const sessionTopicCache = new Map<string, string>();
+
+interface SessionMeta {
+  title: string;
+  sessionId: string;
+  createdAt: string;
+}
+
+function getMetaPath(sessionId: string): string {
+  return path.join(getSessionsDir(), `${sessionId.slice(0, 8)}.meta.json`);
+}
+
+function readSessionMeta(sessionId: string): SessionMeta | null {
+  try {
+    const metaPath = getMetaPath(sessionId);
+    if (fs.existsSync(metaPath)) {
+      return JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function writeSessionMeta(sessionId: string, title: string): void {
+  try {
+    const meta: SessionMeta = {
+      title,
+      sessionId,
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(getMetaPath(sessionId), JSON.stringify(meta, null, 2), "utf8");
+  } catch {
+    // ignore
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Session archive helpers                                            */
@@ -496,25 +533,43 @@ function formatAge(date: Date): string {
   return `${days}d ago`;
 }
 
-function archiveSession(ctx: ExtensionContext): void {
+function getDefaultSessionName(): string {
+  return `session-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+}
+
+async function archiveSession(ctx: ExtensionContext): Promise<void> {
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile || !fs.existsSync(sessionFile)) return;
   const sessionId = ctx.sessionManager.getSessionId();
-  const sessionName = ctx.sessionManager.getSessionName() || "unnamed";
 
-  // Récupérer ou calculer le topic (figé pour cette session)
+  // 1. Check in-memory cache first
   let topicName = sessionTopicCache.get(sessionId);
+
+  // 2. Check persisted meta file
   if (!topicName) {
-    topicName = generateTopicName(ctx);
-    sessionTopicCache.set(sessionId, topicName);
+    const meta = readSessionMeta(sessionId);
+    if (meta?.title) {
+      topicName = meta.title;
+      sessionTopicCache.set(sessionId, topicName);
+    }
   }
 
-  const baseName = topicName || sessionName.replace(/[^a-z0-9_\-\s]/gi, "").replace(/\s+/g, "_").slice(0, 40);
+  // 3. Generate via LLM (only once per session)
+  if (!topicName) {
+    topicName = await generateTopicName(ctx);
+    if (topicName) {
+      sessionTopicCache.set(sessionId, topicName);
+      writeSessionMeta(sessionId, topicName);
+    }
+  }
+
+  // 4. Fallback to readable default name
+  const baseName = topicName || getDefaultSessionName();
   const safeName = baseName.slice(0, 40);
   const fileName = `${safeName}_${sessionId.slice(0, 8)}.jsonl`;
   const destPath = path.join(getSessionsDir(), fileName);
 
-  // Supprimer les anciens fichiers de cette session (même sessionId) pour éviter l'accumulation
+  // Remove old files for this session to avoid accumulation
   const sessionPrefix = `_${sessionId.slice(0, 8)}.jsonl`;
   try {
     const sessionsDir = getSessionsDir();
@@ -572,6 +627,12 @@ function cleanupOldSessions(): { deleted: number; names: string[] } {
       if (now - stat.mtime.getTime() > SESSION_MAX_AGE_MS) {
         fs.unlinkSync(filePath);
         deleted.push(entry.name);
+        // Also remove associated .meta.json
+        const match = entry.name.match(/_([a-f0-9]{8})\.jsonl$/);
+        if (match) {
+          const metaPath = path.join(dir, `${match[1]}.meta.json`);
+          try { fs.unlinkSync(metaPath); } catch {}
+        }
       }
     } catch {
       // ignore cleanup errors
@@ -580,15 +641,22 @@ function cleanupOldSessions(): { deleted: number; names: string[] } {
   return { deleted: deleted.length, names: deleted };
 }
 
-function listArchivedSessions(): Array<{ name: string; filePath: string; mtime: Date; size: number }> {
+function listArchivedSessions(): Array<{ name: string; title: string; filePath: string; mtime: Date; size: number }> {
   const dir = getSessionsDir();
-  const sessions: Array<{ name: string; filePath: string; mtime: Date; size: number }> = [];
+  const sessions: Array<{ name: string; title: string; filePath: string; mtime: Date; size: number }> = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
     const filePath = path.join(dir, entry.name);
     try {
       const stat = fs.statSync(filePath);
-      sessions.push({ name: entry.name, filePath, mtime: stat.mtime, size: stat.size });
+      // Extract sessionId from filename: <name>_<sessionId-first-8>.jsonl
+      const match = entry.name.match(/_([a-f0-9]{8})\.jsonl$/);
+      let title = entry.name.replace(/\.jsonl$/, "");
+      if (match) {
+        const meta = readSessionMeta(match[1]);
+        if (meta?.title) title = meta.title;
+      }
+      sessions.push({ name: entry.name, title, filePath, mtime: stat.mtime, size: stat.size });
     } catch {
       // ignore
     }
@@ -1734,11 +1802,11 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
   // Auto-archive session on every turn and on shutdown
   pi.on("turn_end", async (_event, ctx) => {
-    archiveSession(ctx);
+    await archiveSession(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    archiveSession(ctx);
+    await archiveSession(ctx);
   });
 
   // Auto-cleanup old sessions on startup
@@ -1800,21 +1868,30 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
   // /session-history command
   pi.registerCommand("session-history", {
-    description: "List archived sessions and restore a previous one",
+    description: "List archived sessions and restore a previous one. Pass a query to filter by title.",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify("/session-history requires an interactive or RPC session.", "error");
         return;
       }
 
-      const sessions = listArchivedSessions();
+      const query = (_args || "").trim().toLowerCase();
+      let sessions = listArchivedSessions();
+
+      // Filter by title if a query is provided
+      if (query) {
+        sessions = sessions.filter(
+          (s) => s.title.toLowerCase().includes(query) || s.name.toLowerCase().includes(query)
+        );
+      }
+
       if (sessions.length === 0) {
-        ctx.ui.notify("No archived sessions found.", "info");
+        ctx.ui.notify(query ? `No sessions matching "${query}".` : "No archived sessions found.", "info");
         return;
       }
 
       const choices = sessions.map(
-        (s) => `${s.name}  —  ${formatAge(s.mtime)}, ${(s.size / 1024).toFixed(1)} KB`
+        (s) => `${s.title}  \u2014  ${formatAge(s.mtime)}, ${(s.size / 1024).toFixed(1)} KB`
       );
 
       const choice = await ctx.ui.select("Select a session to restore:", choices);
@@ -1827,7 +1904,7 @@ export default function thetisMemoryExtension(pi: ExtensionAPI) {
 
       await ctx.switchSession(target.filePath, {
         withSession: async (newCtx) => {
-          newCtx.ui.notify(`Restored session: ${target.name}`, "success");
+          newCtx.ui.notify(`Restored session: ${target.title}`, "success");
         },
       });
     },
